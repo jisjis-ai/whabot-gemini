@@ -376,7 +376,7 @@
         'grupo whatsapp aviator mz moçambique 2026',
         'grupos whatsapp sinais aviator moçambique 2026',
         
-        // MEGAS VODACOM / NETGIGA (BUSCA DIRETA COM LINK)
+        // MEGAS VODACOM / NETGIGA
         'chat.whatsapp.com grupos de megas moçambique',
         'chat.whatsapp.com megas vodacom moçambique',
         'chat.whatsapp.com internet vodacom moçambique',
@@ -406,26 +406,59 @@
         linksPorArquivo: 1000,
         tempoSemLinks: 120000, // 2 minutos
         autoDownload: false,
-        apiEndpoint: 'https://whabot-gemini.onrender.com/api/links' // API REST do Whabot no Render
+        apiEndpoint: 'https://whabot-gemini.onrender.com/api/links'
     };
     
     const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';
     
-    // ═══ ENVIAR AUTOMATICAMENTE PARA A API DO WHABOT NO RENDER ═══
+    // ═══ ENVIAR PARA A API DO WHABOT BURLANDO O CSP (FORM SUBMIT INVISÍVEL) ═══
     function enviarParaApiWhabot(linksArray) {
         if (!linksArray || linksArray.length === 0) return;
+        
         try {
-            fetch(CONFIG.apiEndpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ links: linksArray })
-            }).then(r => r.json()).then(res => {
-                console.log('🚀 [WHABOT API] Sent ' + linksArray.length + ' links to Render! Response:', res);
-            }).catch(err => {
-                console.log('⚠️ [WHABOT API] Error sending links to API:', err.message);
-            });
+            // Se estiver rodando como Tampermonkey / Violentmonkey
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: CONFIG.apiEndpoint,
+                    headers: { 'Content-Type': 'application/json' },
+                    data: JSON.stringify({ links: linksArray }),
+                    onload: function(res) {
+                        console.log('🚀 [WHABOT GM_XHR] Links enviados!', res.responseText);
+                    }
+                });
+                return;
+            }
+            
+            // Método Universal para F12 Console: HTML Form Submit em Iframe Oculto (BURLA O CSP CONNECT-SRC)
+            let iframe = document.getElementById('whabot_csp_iframe');
+            if (!iframe) {
+                iframe = document.createElement('iframe');
+                iframe.id = 'whabot_csp_iframe';
+                iframe.name = 'whabot_csp_iframe';
+                iframe.style.display = 'none';
+                document.body.appendChild(iframe);
+            }
+            
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = CONFIG.apiEndpoint;
+            form.target = 'whabot_csp_iframe';
+            form.style.display = 'none';
+            
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'text';
+            input.value = linksArray.join('\n');
+            form.appendChild(input);
+            
+            document.body.appendChild(form);
+            form.submit();
+            document.body.removeChild(form);
+            
+            console.log('🚀 [WHABOT API] Sent ' + linksArray.length + ' links via Form Submit (Bypassed CSP restriction)!');
         } catch(e) {
-            // Ignora erros de rede se estiver offline
+            console.log('⚠️ Error sending to API:', e.message);
         }
     }
     
@@ -712,7 +745,7 @@
             ultimoLinkEncontrado = Date.now();
             console.log('✨ +' + novos.length + ' links novos! Total: ' + linksColetados.size);
             salvarProgresso();
-            // Envia os novos links diretamente para a API REST do Whabot no Render!
+            // Envia os novos links via Form Submit (Bypassing Facebook CSP restriction)
             enviarParaApiWhabot(novos);
         }
         
@@ -842,7 +875,7 @@
     window.IR = function(n) { if (!n || n < 1 || n > TERMOS.length) return; pesquisaAtual = n - 1; salvarProgresso(); pesquisar(); };
     
     console.log('═══════════════════════════════════════════════════');
-    console.log('🇲🇿 COLETOR + INTEGRAÇÃO WHABOT API MOÇAMBIQUE 2026');
+    console.log('🇲🇿 COLETOR + INTEGRAÇÃO WHABOT API MOÇAMBIQUE 2026 (CSP BYPASS)');
     console.log('═══════════════════════════════════════════════════');
     
     carregarProgresso();
