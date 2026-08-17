@@ -21,10 +21,10 @@ import { extractInviteCodes, getRandomDelay, sleep, formatDate } from './utils.j
 const CONFIG_PATH = path.resolve(process.cwd(), 'config.json');
 let config = {
   prefix: '!entrar',
-  minDelaySeconds: 20,
-  maxDelaySeconds: 50,
-  batchLimit: 10,
-  rescheduleHours: 6,
+  minDelaySeconds: 2,
+  maxDelaySeconds: 5,
+  batchLimit: 0, // 0 = Sem limite artificial do bot (processa tudo continuo até o WhatsApp barrar)
+  rescheduleHours: 2,
   adminJids: [],
   allowAllAdmins: true
 };
@@ -77,7 +77,7 @@ const server = http.createServer(async (req, res) => {
           <div class="card">
             <div class="badge">✅ WhatsApp Conectado</div>
             <h2>Whabot Group Joiner</h2>
-            <p>O bot está ativo e aguardando comandos (<code>${config.prefix}</code>) no WhatsApp.</p>
+            <p>O bot está ativo e processando grupos sem limites artificiais (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
           </div>
         </body>
       </html>
@@ -143,7 +143,7 @@ server.listen(PORT, () => {
 
 async function startBot() {
   console.log('--------------------------------------------------');
-  console.log('🚀 Inicializando Bot WhatsApp de Entrada em Grupos');
+  console.log('🚀 Inicializando Bot WhatsApp de Entrada Rápida em Grupos');
   console.log('--------------------------------------------------');
 
   const baseDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
@@ -196,10 +196,10 @@ async function startBot() {
       isConnected = true;
       latestQR = null;
       console.log('✅ Conexão estabelecida com sucesso com o WhatsApp!');
-      console.log(`🤖 Bot aguardando comandos (${config.prefix}). Modos anti-ban ativos.`);
+      console.log(`🤖 Bot em modo alta velocidade (${config.minDelaySeconds}-${config.maxDelaySeconds}s). Sem limite artificial de lote.`);
 
-      // Iniciar Cron Job para verificar fila a cada 5 minutos
-      cron.schedule('*/5 * * * *', () => {
+      // Iniciar Cron Job para verificar fila a cada 3 minutos
+      cron.schedule('*/3 * * * *', () => {
         checkAndProcessScheduledQueue(sock);
       });
     }
@@ -307,10 +307,10 @@ async function startBot() {
           const { addedCount, totalPending } = queueManager.addToQueue(uniqueLinks, fromJid);
 
           await sock.sendMessage(fromJid, {
-            text: `📥 *Convites Registrados*\n\n• Adicionados nesta chamada: *${addedCount}*\n• Novos links únicos: *${uniqueLinks.length}*\n• Total pendente na fila: *${totalPending}*\n\nIniciando o processamento do lote respeitando o limite anti-ban (${config.batchLimit} grupos/lote e delays de ${config.minDelaySeconds}-${config.maxDelaySeconds}s)...`
+            text: `⚡ *Convites Registrados para Entrada Rápida*\n\n• Adicionados nesta chamada: *${addedCount}*\n• Novos links únicos: *${uniqueLinks.length}*\n• Total pendente na fila: *${totalPending}*\n\nIniciando entradas em modo de alta velocidade (${config.minDelaySeconds}-${config.maxDelaySeconds}s por grupo) sem limite artificial...`
           });
 
-          // Iniciar o processamento do lote
+          // Iniciar o processamento contínuo
           await processQueueBatch(sock, fromJid);
         }
       }
@@ -321,23 +321,23 @@ async function startBot() {
 }
 
 /**
- * Processa um lote de grupos pendentes na fila
+ * Processa a fila de grupos pendentes sem limites artificiais (até o WhatsApp bloquear)
  * @param {import('@whiskeysockets/baileys').WASocket} sock 
  * @param {string} defaultTargetJid 
  */
 async function processQueueBatch(sock, defaultTargetJid) {
   if (isProcessing) {
-    console.log('⏳ O lote já está em execução no momento.');
+    console.log('⏳ O processamento da fila já está em execução no momento.');
     return;
   }
 
-  // Verificar se há uma pausa agendada ativa por limite anti-ban
+  // Verificar se há uma pausa agendada ativa por bloqueio direto do WhatsApp
   if (queueManager.isScheduledWaitActive()) {
     const nextRun = queueManager.getNextScheduledRun();
-    console.log(`🛑 Aguardando janela agendada anti-ban até: ${formatDate(nextRun)}`);
+    console.log(`🛑 Aguardando tempo de bloqueio do WhatsApp até: ${formatDate(nextRun)}`);
     if (defaultTargetJid) {
       await sock.sendMessage(defaultTargetJid, {
-        text: `🛑 *Bloqueio Temporário / Limite Anti-Ban Ativo*\n\nO próximo lote está agendado para prosseguir automaticamente em:\n👉 *${formatDate(nextRun)}*\n\nOs links permanecem salvos em segurança na fila.`
+        text: `🛑 *Bloqueio de Frequência do WhatsApp Detectado*\n\nO WhatsApp bloqueou temporariamente novas entradas. A fila continuará em:\n👉 *${formatDate(nextRun)}*\n\nOs grupos permanecem salvos na fila.`
       });
     }
     return;
@@ -350,9 +350,13 @@ async function processQueueBatch(sock, defaultTargetJid) {
   }
 
   isProcessing = true;
-  console.log(`\n🔄 Iniciando lote. Grupos pendentes na fila: ${pendingItems.length}`);
+  console.log(`\n⚡ Iniciando entradas em alta velocidade. Grupos na fila: ${pendingItems.length}`);
 
-  const batchSize = Math.min(pendingItems.length, config.batchLimit);
+  // Se batchLimit <= 0, processa todos os pendentes de uma vez só!
+  const batchSize = (config.batchLimit && config.batchLimit > 0)
+    ? Math.min(pendingItems.length, config.batchLimit)
+    : pendingItems.length;
+
   const currentBatch = pendingItems.slice(0, batchSize);
 
   const batchResults = [];
@@ -363,14 +367,14 @@ async function processQueueBatch(sock, defaultTargetJid) {
     const item = currentBatch[i];
     const targetJid = item.targetJid || defaultTargetJid;
 
-    // Sorteia delay entre as requisições (exceto no primeiro item do lote)
+    // Sorteia delay ultra rápido entre as requisições (2-5s)
     if (i > 0) {
       const delayMs = getRandomDelay(config.minDelaySeconds, config.maxDelaySeconds);
-      console.log(`⏳ Aguardando delay de segurança anti-ban (${Math.round(delayMs / 1000)}s)...`);
+      console.log(`⏱️ Delay rápido (${(delayMs / 1000).toFixed(1)}s)...`);
       await sleep(delayMs);
     }
 
-    console.log(`[${i + 1}/${currentBatch.length}] Tentando entrar no grupo (código: ${item.code})...`);
+    console.log(`[${i + 1}/${currentBatch.length}] Entrando no grupo (código: ${item.code})...`);
 
     const result = await joinGroup(sock, item.code);
 
@@ -395,9 +399,9 @@ async function processQueueBatch(sock, defaultTargetJid) {
         groupName: result.groupName
       });
 
-      // Se a falha foi por bloqueio de taxa do WhatsApp (Rate limit)
+      // Se a falha foi imposta diretamente pelo WhatsApp (Rate Limit 429/463/overload)
       if (result.isRateLimited) {
-        console.log('⚠️ Detectado Rate Limit do WhatsApp. Interrompendo lote e agendando retentativa.');
+        console.log('⚠️ O WhatsApp retornou restrição de limite (Rate Limit). Pausando a fila por segurança.');
         limitReached = true;
         scheduledNextRun = queueManager.scheduleNextBatch(config.rescheduleHours);
         break;
@@ -407,11 +411,10 @@ async function processQueueBatch(sock, defaultTargetJid) {
 
   const remainingPending = queueManager.getPendingItems().length;
 
-  // Se o lote terminou com sucesso de atingir o limite configurado por lote e ainda sobraram itens na fila
-  if (!limitReached && remainingPending > 0 && currentBatch.length === config.batchLimit) {
+  // Se limite de lote artificial esteve ativo e sobrou algo
+  if (!limitReached && remainingPending > 0 && config.batchLimit > 0 && currentBatch.length === config.batchLimit) {
     limitReached = true;
     scheduledNextRun = queueManager.scheduleNextBatch(config.rescheduleHours);
-    console.log(`🛑 Limite configurado de ${config.batchLimit} grupos por lote atingido. Próximo lote agendado para: ${formatDate(scheduledNextRun)}`);
   }
 
   // Gerar e enviar o relatório final do lote para o solicitante
@@ -441,7 +444,7 @@ async function processQueueBatch(sock, defaultTargetJid) {
 async function checkAndProcessScheduledQueue(sock) {
   if (isProcessing) return;
   if (queueManager.getPendingItems().length > 0 && !queueManager.isScheduledWaitActive()) {
-    console.log('⏰ Horário agendado atingido! Reprocessando fila de grupos pendentes...');
+    console.log('⏰ Reprocessando fila de grupos pendentes...');
     const firstPending = queueManager.getPendingItems()[0];
     await processQueueBatch(sock, firstPending?.targetJid);
   }
