@@ -16,6 +16,16 @@ import { QueueManager } from './queueManager.js';
 import { joinGroup } from './groupManager.js';
 import { generateReport } from './reportManager.js';
 import { extractInviteCodes, getRandomDelay, sleep, formatDate } from './utils.js';
+import {
+  initDb,
+  addLinks,
+  getPendingLinks,
+  getPendingCount,
+  updateLinkStatus,
+  deleteAllLinks,
+  getAllLinks,
+  getStats
+} from './database.js';
 
 // Carregar arquivo de configuração
 const CONFIG_PATH = path.resolve(process.cwd(), 'config.json');
@@ -23,7 +33,7 @@ let config = {
   prefix: '!entrar',
   minDelaySeconds: 2,
   maxDelaySeconds: 5,
-  batchLimit: 0, // 0 = Sem limite artificial do bot (processa tudo continuo até o WhatsApp barrar)
+  batchLimit: 0, // 0 = Processamento contínuo sem limites artificiais
   rescheduleHours: 2,
   adminJids: [],
   allowAllAdmins: true
@@ -42,42 +52,144 @@ const queueManager = new QueueManager();
 let isProcessing = false;
 let latestQR = null;
 let isConnected = false;
+let globalSock = null;
+
+// Estado para Modo Real-Time DB (RDB) e Confirmação de Exclusão
+let rdbModeEnabled = false;
+let rdbTargetJid = null;
+let deletePendingMap = new Map(); // targetJid -> timestamp limite
 
 // ---------------------------------------------------------
-// Servidor HTTP para Render (Health Check & QR Code na Web)
+// Servidor HTTP & API REST para Render
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(async (req, res) => {
-  const url = req.url || '/';
+  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const pathname = urlObj.pathname;
+  const method = req.method || 'GET';
 
-  if (url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', connected: isConnected }));
+  // Configurar cabeçalhos CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
     return;
   }
 
-  // Página principal que exibe o QR Code ou status de conectado
+  // Endpoint: Health Check
+  if (pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', connected: isConnected, rdbMode: rdbModeEnabled }));
+    return;
+  }
+
+  // Endpoint REST API: POST /api/links (Cadastrar novos links no Banco de Dados)
+  if (pathname === '/api/links' && method === 'POST') {
+    let bodyText = '';
+    req.on('data', (chunk) => {
+      bodyText += chunk;
+    });
+
+    req.on('end', async () => {
+      try {
+        let textToParse = bodyText;
+        if (req.headers['content-type']?.includes('application/json')) {
+          const json = JSON.parse(bodyText || '{}');
+          if (Array.isArray(json.links)) {
+            textToParse = json.links.join('\n');
+          } else if (json.text) {
+            textToParse = json.text;
+          } else if (json.url) {
+            textToParse = json.url;
+          }
+        }
+
+        const extracted = extractInviteCodes(textToParse);
+        const { addedCount, totalPending } = await addLinks(extracted);
+
+        // Se o modo RDB estiver ativo e houver socket do bot, dispara o processamento em tempo real!
+        if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
+          console.log(`⚡ [RDB Real-Time] ${addedCount} novos links detectados via API. Processando em tempo real...`);
+          setImmediate(() => {
+            processDatabaseQueue(globalSock, rdbTargetJid);
+          });
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            success: true,
+            extractedCount: extracted.length,
+            addedCount: addedCount,
+            totalPending: totalPending,
+            rdbTriggered: rdbModeEnabled
+          })
+        );
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Endpoint REST API: GET /api/links (Listar links cadastrados)
+  if (pathname === '/api/links' && method === 'GET') {
+    const statusFilter = urlObj.searchParams.get('status');
+    const links = await getAllLinks(statusFilter);
+    const stats = await getStats();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, stats, count: links.length, data: links }));
+    return;
+  }
+
+  // Endpoint REST API: DELETE /api/links (Limpar banco via API)
+  if (pathname === '/api/links' && method === 'DELETE') {
+    const count = await deleteAllLinks();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, deletedCount: count }));
+    return;
+  }
+
+  // Página Principal Web: QR Code e Status Painel
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  
+
   if (isConnected) {
+    const stats = await getStats();
     res.end(`
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Whabot Status</title>
+          <title>Whabot Painel</title>
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
-            body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-            .card { background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 400px; }
-            .badge { background: #22c55e; color: #fff; padding: 6px 12px; border-radius: 20px; font-weight: bold; display: inline-block; margin-bottom: 1rem; }
+            body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
+            .card { background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 480px; width: 100%; text-align: center; }
+            .badge { background: #22c55e; color: #fff; padding: 6px 14px; border-radius: 20px; font-weight: bold; display: inline-block; margin-bottom: 1rem; }
+            .rdb-badge { background: ${rdbModeEnabled ? '#3b82f6' : '#64748b'}; color: #fff; padding: 4px 10px; border-radius: 12px; font-size: 0.85rem; margin-left: 6px; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 1.5rem; text-align: left; }
+            .box { background: #0f172a; padding: 12px; border-radius: 8px; font-size: 0.9rem; }
+            .box span { display: block; font-size: 1.3rem; font-weight: bold; color: #38bdf8; }
           </style>
         </head>
         <body>
           <div class="card">
             <div class="badge">✅ WhatsApp Conectado</div>
+            <span class="rdb-badge">${rdbModeEnabled ? '⚡ RDB Ativo' : '⏹️ RDB Inativo'}</span>
             <h2>Whabot Group Joiner</h2>
-            <p>O bot está ativo e processando grupos sem limites artificiais (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
+            <p>Bot operando via PostgreSQL e API REST (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
+            
+            <div class="grid">
+              <div class="box">Pendentes no DB: <span>${stats.pending}</span></div>
+              <div class="box">Sucessos: <span>${stats.success}</span></div>
+              <div class="box">Falhas: <span>${stats.failed}</span></div>
+              <div class="box">Total Geral: <span>${stats.total}</span></div>
+            </div>
           </div>
         </body>
       </html>
@@ -137,8 +249,9 @@ const server = http.createServer(async (req, res) => {
   `);
 });
 
-server.listen(PORT, () => {
-  console.log(`🌐 Servidor Web rodando na porta ${PORT} (Painel e Health Check ativos)`);
+server.listen(PORT, async () => {
+  console.log(`🌐 Servidor Web & API REST rodando na porta ${PORT}`);
+  await initDb();
 });
 
 async function startBot() {
@@ -163,6 +276,8 @@ async function startBot() {
     auth: state,
     browser: ['Whabot Group Joiner', 'Chrome', '1.0.0']
   });
+
+  globalSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -196,11 +311,11 @@ async function startBot() {
       isConnected = true;
       latestQR = null;
       console.log('✅ Conexão estabelecida com sucesso com o WhatsApp!');
-      console.log(`🤖 Bot em modo alta velocidade (${config.minDelaySeconds}-${config.maxDelaySeconds}s). Sem limite artificial de lote.`);
+      console.log(`🤖 Bot ativo com banco de dados PostgreSQL.`);
 
-      // Iniciar Cron Job para verificar fila a cada 3 minutos
+      // Cron Job para verificar pendentes no banco a cada 3 minutos
       cron.schedule('*/3 * * * *', () => {
-        checkAndProcessScheduledQueue(sock);
+        checkScheduledDbQueue(sock);
       });
     }
   });
@@ -211,18 +326,15 @@ async function startBot() {
       if (m.type !== 'notify') return;
 
       for (const msg of m.messages) {
-        // Ignorar mensagens de sistema ou de status
         if (!msg.message || (msg.key.fromMe && !config.allowAllAdmins)) continue;
 
         const fromJid = msg.key.remoteJid;
         const senderJid = msg.key.participant || msg.key.remoteJid;
 
-        // Se houver restrição de JIDs de admin no config
         if (config.adminJids.length > 0 && !config.adminJids.includes(senderJid.split('@')[0])) {
           continue;
         }
 
-        // Extrair texto da mensagem (suporta texto direto ou legenda de mídia)
         const textContent =
           msg.message.conversation ||
           msg.message.extendedTextMessage?.text ||
@@ -231,17 +343,95 @@ async function startBot() {
           '';
 
         const trimmedText = textContent.trim();
+        const lowerText = trimmedText.toLowerCase();
 
-        // Verificar se a mensagem inicia com o comando !entrar
+        // ---------------------------------------------------------
+        // 1. COMANDO: !confirmar delete (Executa a limpeza no DB)
+        // ---------------------------------------------------------
+        if (lowerText === '!confirmar delete') {
+          const limitTime = deletePendingMap.get(fromJid);
+          if (limitTime && Date.now() <= limitTime) {
+            deletePendingMap.delete(fromJid);
+            const deletedCount = await deleteAllLinks();
+            await sock.sendMessage(fromJid, {
+              text: `🗑️ *Banco de Dados Limpo!*\n\nForam excluídos *${deletedCount}* registros do banco de dados PostgreSQL.`
+            });
+          } else {
+            deletePendingMap.delete(fromJid);
+            await sock.sendMessage(fromJid, {
+              text: `⚠️ Nenhuma solicitação de exclusão pendente ou o tempo de 60 segundos expirou. Use \`!delete\` para solicitar novamente.`
+            });
+          }
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 2. COMANDO: !delete ou !deletar db (Trava com Confirmação)
+        // ---------------------------------------------------------
+        if (lowerText === '!delete' || lowerText === '!deletar db') {
+          deletePendingMap.set(fromJid, Date.now() + 60000); // Válido por 60s
+          await sock.sendMessage(fromJid, {
+            text: `⚠️ *ATENÇÃO: Confirmação de Exclusão*\n\nVocê solicitou apagar TODOS os links salvos no banco de dados.\n\nPara confirmar a exclusão definitiva, envie o comando abaixo em até *60 segundos*:\n👉 *\`!confirmar delete\`*`
+          });
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 3. COMANDO: !entrar rdb (Alternar Modo Real-Time DB)
+        // ---------------------------------------------------------
+        if (lowerText === '!entrar rdb') {
+          rdbModeEnabled = !rdbModeEnabled;
+          rdbTargetJid = fromJid;
+
+          if (rdbModeEnabled) {
+            const pendingCount = await getPendingCount();
+            await sock.sendMessage(fromJid, {
+              text: `⚡ *Modo Real-Time DB (RDB) ATIVADO!*\n\nCada novo link cadastrado no banco de dados via API REST (\`POST /api/links\`) será processado **imediatamente** em tempo real.\n\n• Links pendentes no banco atualmente: *${pendingCount}*\nOs relatórios serão enviados nesta conversa.`
+            });
+
+            // Se já houver pendentes no banco, inicia o processamento imediato
+            if (pendingCount > 0) {
+              await processDatabaseQueue(sock, fromJid);
+            }
+          } else {
+            await sock.sendMessage(fromJid, {
+              text: `⏹️ *Modo Real-Time DB (RDB) DESATIVADO.*\nO bot não processará novos links da API automaticamente.`
+            });
+          }
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 4. COMANDO: !entrar db (Processar Links Pendentes do DB)
+        // ---------------------------------------------------------
+        if (lowerText === '!entrar db') {
+          const pendingCount = await getPendingCount();
+          if (pendingCount === 0) {
+            await sock.sendMessage(fromJid, {
+              text: `ℹ️ *Banco de Dados sem Links Pendentes*\n\nNão há grupos com status \`pending\` no banco de dados no momento.`
+            });
+            continue;
+          }
+
+          await sock.sendMessage(fromJid, {
+            text: `📊 *Processamento de Banco de Dados*\n\n• Links pendentes no DB: *${pendingCount}*\nIniciando entradas em velocidade máxima (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay)...`
+          });
+
+          await processDatabaseQueue(sock, fromJid);
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 5. COMANDO: !entrar <links> (Modo padrão: cadastra no DB e processa)
+        // ---------------------------------------------------------
         if (trimmedText.startsWith(config.prefix)) {
           console.log(`\n📩 Comando ${config.prefix} recebido de: ${senderJid}`);
           let linksToProcess = [];
 
-          // 1. Extrair links do texto da mensagem
           const linksFromText = extractInviteCodes(trimmedText);
           linksToProcess.push(...linksFromText);
 
-          // 2. Verificar se há um arquivo .txt anexado à mensagem
+          // Anexo .txt
           if (msg.message.documentMessage) {
             const doc = msg.message.documentMessage;
             const fileName = doc.fileName || '';
@@ -261,27 +451,21 @@ async function startBot() {
                 );
                 const fileText = buffer.toString('utf-8');
                 const linksFromFile = extractInviteCodes(fileText);
-                console.log(`📄 Links extraídos do arquivo ${fileName}: ${linksFromFile.length}`);
                 linksToProcess.push(...linksFromFile);
               } catch (err) {
-                console.error('Erro ao baixar/ler arquivo anexado:', err.message);
-                await sock.sendMessage(fromJid, {
-                  text: `⚠️ Erro ao ler o arquivo anexado: ${err.message}`
-                });
+                console.error('Erro ao ler arquivo anexado:', err.message);
               }
             }
           }
 
-          // 3. Verificar se indicou o nome de um arquivo local (ex: !entrar links.txt)
+          // Arquivo local .txt
           const args = trimmedText.slice(config.prefix.length).trim().split(/\s+/);
           if (args.length > 0 && args[0].endsWith('.txt')) {
             const localFilePath = path.resolve(process.cwd(), args[0]);
             if (fs.existsSync(localFilePath)) {
               try {
-                console.log(`📄 Lendo arquivo local: ${args[0]}...`);
                 const content = fs.readFileSync(localFilePath, 'utf-8');
                 const linksFromLocal = extractInviteCodes(content);
-                console.log(`📄 Links extraídos de ${args[0]}: ${linksFromLocal.length}`);
                 linksToProcess.push(...linksFromLocal);
               } catch (err) {
                 console.error('Erro ao ler arquivo local:', err.message);
@@ -289,7 +473,6 @@ async function startBot() {
             }
           }
 
-          // Remover duplicados da lista capturada nesta requisição
           const uniqueLinksMap = new Map();
           for (const item of linksToProcess) {
             uniqueLinksMap.set(item.code, item);
@@ -298,20 +481,19 @@ async function startBot() {
 
           if (uniqueLinks.length === 0) {
             await sock.sendMessage(fromJid, {
-              text: `⚠️ Nenhum link de grupo válido do WhatsApp foi encontrado na mensagem ou arquivo enviado.\n\n*Exemplo de Uso:*\n\`${config.prefix} https://chat.whatsapp.com/ExemploCodigo...\` ou envie um arquivo .txt com os links.`
+              text: `⚠️ Nenhum link de grupo válido do WhatsApp foi encontrado.\n\n*Comandos Disponíveis:*\n• \`!entrar <links>\` - Adiciona e entra nos links\n• \`!entrar db\` - Entra nos grupos pendentes do Banco de Dados\n• \`!entrar rdb\` - Ativa entrada em tempo real via API REST\n• \`!delete\` - Apaga o banco de dados (exige confirmação)`
             });
             continue;
           }
 
-          // Adicionar à fila persistente
-          const { addedCount, totalPending } = queueManager.addToQueue(uniqueLinks, fromJid);
+          // Adiciona os links no banco PostgreSQL
+          const { addedCount, totalPending } = await addLinks(uniqueLinks);
 
           await sock.sendMessage(fromJid, {
-            text: `⚡ *Convites Registrados para Entrada Rápida*\n\n• Adicionados nesta chamada: *${addedCount}*\n• Novos links únicos: *${uniqueLinks.length}*\n• Total pendente na fila: *${totalPending}*\n\nIniciando entradas em modo de alta velocidade (${config.minDelaySeconds}-${config.maxDelaySeconds}s por grupo) sem limite artificial...`
+            text: `📥 *Links Registrados no Banco de Dados*\n\n• Novos links inseridos: *${addedCount}*\n• Total pendente no DB: *${totalPending}*\n\nIniciando o processamento...`
           });
 
-          // Iniciar o processamento contínuo
-          await processQueueBatch(sock, fromJid);
+          await processDatabaseQueue(sock, fromJid);
         }
       }
     } catch (err) {
@@ -321,66 +503,46 @@ async function startBot() {
 }
 
 /**
- * Processa a fila de grupos pendentes sem limites artificiais (até o WhatsApp bloquear)
+ * Processa os links com status 'pending' diretamente do banco de dados PostgreSQL
  * @param {import('@whiskeysockets/baileys').WASocket} sock 
- * @param {string} defaultTargetJid 
+ * @param {string} targetJid 
  */
-async function processQueueBatch(sock, defaultTargetJid) {
+async function processDatabaseQueue(sock, targetJid) {
   if (isProcessing) {
-    console.log('⏳ O processamento da fila já está em execução no momento.');
+    console.log('⏳ O processamento da fila já está em execução.');
     return;
   }
 
-  // Verificar se há uma pausa agendada ativa por bloqueio direto do WhatsApp
-  if (queueManager.isScheduledWaitActive()) {
-    const nextRun = queueManager.getNextScheduledRun();
-    console.log(`🛑 Aguardando tempo de bloqueio do WhatsApp até: ${formatDate(nextRun)}`);
-    if (defaultTargetJid) {
-      await sock.sendMessage(defaultTargetJid, {
-        text: `🛑 *Bloqueio de Frequência do WhatsApp Detectado*\n\nO WhatsApp bloqueou temporariamente novas entradas. A fila continuará em:\n👉 *${formatDate(nextRun)}*\n\nOs grupos permanecem salvos na fila.`
-      });
-    }
-    return;
-  }
-
-  const pendingItems = queueManager.getPendingItems();
-  if (pendingItems.length === 0) {
-    console.log('✅ Nenhum grupo pendente na fila para processar.');
+  // Buscar todos os links pendentes no PostgreSQL
+  const pendingLinks = await getPendingLinks();
+  if (pendingLinks.length === 0) {
+    console.log('✅ Nenhum grupo pendente no PostgreSQL.');
     return;
   }
 
   isProcessing = true;
-  console.log(`\n⚡ Iniciando entradas em alta velocidade. Grupos na fila: ${pendingItems.length}`);
-
-  // Se batchLimit <= 0, processa todos os pendentes de uma vez só!
-  const batchSize = (config.batchLimit && config.batchLimit > 0)
-    ? Math.min(pendingItems.length, config.batchLimit)
-    : pendingItems.length;
-
-  const currentBatch = pendingItems.slice(0, batchSize);
+  console.log(`\n⚡ Processando ${pendingLinks.length} links pendentes do Banco de Dados PostgreSQL...`);
 
   const batchResults = [];
   let limitReached = false;
   let scheduledNextRun = null;
 
-  for (let i = 0; i < currentBatch.length; i++) {
-    const item = currentBatch[i];
-    const targetJid = item.targetJid || defaultTargetJid;
+  for (let i = 0; i < pendingLinks.length; i++) {
+    const item = pendingLinks[i];
 
-    // Sorteia delay ultra rápido entre as requisições (2-5s)
     if (i > 0) {
       const delayMs = getRandomDelay(config.minDelaySeconds, config.maxDelaySeconds);
-      console.log(`⏱️ Delay rápido (${(delayMs / 1000).toFixed(1)}s)...`);
+      console.log(`⏱️ Delay (${(delayMs / 1000).toFixed(1)}s)...`);
       await sleep(delayMs);
     }
 
-    console.log(`[${i + 1}/${currentBatch.length}] Entrando no grupo (código: ${item.code})...`);
+    console.log(`[${i + 1}/${pendingLinks.length}] Entrando no grupo (código: ${item.code})...`);
 
     const result = await joinGroup(sock, item.code);
 
     if (result.success) {
       console.log(`   ✅ Sucesso! Entrou no grupo: "${result.groupName}"`);
-      queueManager.markProcessed(item.code, 'success', result.reason, result.groupName);
+      await updateLinkStatus(item.code, 'success', result.groupName, result.reason || 'Entrada efetuada');
       batchResults.push({
         code: item.code,
         url: item.url,
@@ -390,36 +552,37 @@ async function processQueueBatch(sock, defaultTargetJid) {
       });
     } else {
       console.log(`   ❌ Falha! Motivo: ${result.reason}`);
-      queueManager.markProcessed(item.code, 'failed', result.reason, result.groupName);
-      batchResults.push({
-        code: item.code,
-        url: item.url,
-        status: 'failed',
-        reason: result.reason,
-        groupName: result.groupName
-      });
 
-      // Se a falha foi imposta diretamente pelo WhatsApp (Rate Limit 429/463/overload)
       if (result.isRateLimited) {
-        console.log('⚠️ O WhatsApp retornou restrição de limite (Rate Limit). Pausando a fila por segurança.');
+        console.log('⚠️ Detectado Rate Limit do WhatsApp. Mantendo link no DB e pausando...');
+        await updateLinkStatus(item.code, 'rate_limited', result.groupName, result.reason);
+        batchResults.push({
+          code: item.code,
+          url: item.url,
+          status: 'failed',
+          reason: result.reason,
+          groupName: result.groupName
+        });
         limitReached = true;
         scheduledNextRun = queueManager.scheduleNextBatch(config.rescheduleHours);
         break;
+      } else {
+        // Falha definitiva (ex: link inválido, revogado, grupo cheio)
+        await updateLinkStatus(item.code, 'failed', result.groupName, result.reason);
+        batchResults.push({
+          code: item.code,
+          url: item.url,
+          status: 'failed',
+          reason: result.reason,
+          groupName: result.groupName
+        });
       }
     }
   }
 
-  const remainingPending = queueManager.getPendingItems().length;
+  const remainingPending = await getPendingCount();
 
-  // Se limite de lote artificial esteve ativo e sobrou algo
-  if (!limitReached && remainingPending > 0 && config.batchLimit > 0 && currentBatch.length === config.batchLimit) {
-    limitReached = true;
-    scheduledNextRun = queueManager.scheduleNextBatch(config.rescheduleHours);
-  }
-
-  // Gerar e enviar o relatório final do lote para o solicitante
-  const reportJid = defaultTargetJid || currentBatch[0]?.targetJid;
-  if (reportJid) {
+  if (targetJid) {
     const reportText = generateReport({
       results: batchResults,
       totalPending: remainingPending,
@@ -428,8 +591,8 @@ async function processQueueBatch(sock, defaultTargetJid) {
     });
 
     try {
-      await sock.sendMessage(reportJid, { text: reportText });
-      console.log('📊 Relatório enviado com sucesso para o solicitante.');
+      await sock.sendMessage(targetJid, { text: reportText });
+      console.log('📊 Relatório do banco de dados enviado com sucesso.');
     } catch (err) {
       console.error('Erro ao enviar relatório:', err.message);
     }
@@ -439,14 +602,16 @@ async function processQueueBatch(sock, defaultTargetJid) {
 }
 
 /**
- * Função chamada pelo Cron para verificar se há itens agendados a serem processados
+ * Função executada pelo Cron para verificar se há links pendentes no DB
  */
-async function checkAndProcessScheduledQueue(sock) {
+async function checkScheduledDbQueue(sock) {
   if (isProcessing) return;
-  if (queueManager.getPendingItems().length > 0 && !queueManager.isScheduledWaitActive()) {
-    console.log('⏰ Reprocessando fila de grupos pendentes...');
-    const firstPending = queueManager.getPendingItems()[0];
-    await processQueueBatch(sock, firstPending?.targetJid);
+  const pendingCount = await getPendingCount();
+  if (pendingCount > 0 && !queueManager.isScheduledWaitActive()) {
+    console.log(`⏰ Cron detectou ${pendingCount} links pendentes no DB. Processando...`);
+    if (rdbTargetJid) {
+      await processDatabaseQueue(sock, rdbTargetJid);
+    }
   }
 }
 
