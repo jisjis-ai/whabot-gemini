@@ -1,0 +1,850 @@
+// ═══════════════════════════════════════════════════════════════
+//     COLETOR PROFISSIONAL - GRUPOS WHATSAPP MOÇAMBIQUE 2026
+// ═══════════════════════════════════════════════════════════════
+
+(function() {
+    let ativo = true;
+    let linksColetados = new Set();
+    let linksSalvos = 0;
+    let contadorArquivos = 0;
+    let pesquisaAtual = 0;
+    let estadoAtual = 'INICIANDO';
+    let ultimoLinkEncontrado = Date.now();
+    
+    // ═══ TERMOS DE PESQUISA (300+) ═══
+    const TERMOS = [
+        'grupos whatsapp moçambique 2026',
+        'grupo whatsapp mozambique 2026',
+        'whatsapp groups mozambique 2026',
+        'grupos whatsapp maputo moçambique 2026',
+        'grupo whatsapp maputo moçambique 2026',
+        'grupos whatsapp matola moçambique 2026',
+        'grupos whatsapp beira moçambique 2026',
+        'grupos whatsapp nampula moçambique 2026',
+        'grupos whatsapp tete moçambique 2026',
+        'grupos whatsapp quelimane moçambique 2026',
+        'grupos whatsapp pemba moçambique 2026',
+        'grupos whatsapp chimoio moçambique 2026',
+        'grupos whatsapp nacala moçambique 2026',
+        'grupos whatsapp lichinga moçambique 2026',
+        'grupos whatsapp xai xai moçambique 2026',
+        'grupos whatsapp inhambane moçambique 2026',
+        'grupos whatsapp maxixe moçambique 2026',
+        
+        // ADULTOS / 18+
+        'xxxvideos moçambique 2026',
+        'grupos whatsapp xxxvideos moçambique 2026',
+        'xxxvideos moçambique grupo whatsapp 2026',
+        'grupo whatsapp adultos moçambique 2026',
+        'grupos whatsapp 18+ moçambique 2026',
+        'grupo whatsapp conteúdo adulto moçambique 2026',
+        'grupos whatsapp adulto maputo moçambique 2026',
+        'whatsapp grupos adultos mozambique 2026',
+        'grupos whatsapp +18 moçambique 2026',
+        'grupo whatsapp xxx moçambique 2026',
+        'grupos whatsapp adultos moçambique 2026',
+        'grupo whatsapp picante moçambique 2026',
+        'grupos whatsapp hot moçambique 2026',
+        'grupo whatsapp safado moçambique 2026',
+        'grupos whatsapp casais moçambique 2026',
+        'grupo whatsapp swing moçambique 2026',
+        'grupos whatsapp encontros moçambique 2026',
+        
+        // IGREJAS
+        'grupo igreja moçambique 2026',
+        'grupos whatsapp igreja moçambique 2026',
+        'grupo whatsapp católicos moçambique 2026',
+        'grupos whatsapp evangélicos moçambique 2026',
+        'grupo whatsapp pentecostal moçambique 2026',
+        'grupos whatsapp assembleia deus moçambique 2026',
+        'grupo whatsapp universal moçambique 2026',
+        'grupos whatsapp batista moçambique 2026',
+        'grupo whatsapp adventista moçambique 2026',
+        'grupos whatsapp cristãos moçambique 2026',
+        'grupo whatsapp igreja maputo moçambique 2026',
+        'grupos whatsapp louvor moçambique 2026',
+        'grupo whatsapp gospel moçambique 2026',
+        'grupos whatsapp célula moçambique 2026',
+        'grupo whatsapp oração moçambique 2026',
+        'grupos whatsapp bíblia moçambique 2026',
+        'grupo whatsapp pastor moçambique 2026',
+        'grupos whatsapp missionário moçambique 2026',
+        'grupo whatsapp jovens igreja moçambique 2026',
+        'grupos whatsapp ministério moçambique 2026',
+        
+        // NEGÓCIOS
+        'grupos whatsapp negócios moçambique 2026',
+        'grupo whatsapp negocios mocambique 2026',
+        'grupos whatsapp vendas moçambique 2026',
+        'grupo whatsapp vendas maputo moçambique 2026',
+        'whatsapp business moçambique 2026',
+        'grupos whatsapp empreendedores moçambique 2026',
+        'grupo whatsapp marketing moçambique 2026',
+        'grupos whatsapp compra venda moçambique 2026',
+        'grupos whatsapp comercio moçambique 2026',
+        'grupo whatsapp importação moçambique 2026',
+        'grupos whatsapp vendedores moçambique 2026',
+        'grupo whatsapp exportação moçambique 2026',
+        'grupos whatsapp oportunidades moçambique 2026',
+        
+        // EMPREGOS
+        'grupos whatsapp empregos moçambique 2026',
+        'grupo whatsapp emprego maputo moçambique 2026',
+        'grupos whatsapp vagas moçambique 2026',
+        'grupo whatsapp trabalho moçambique 2026',
+        'grupo whatsapp recrutamento moçambique 2026',
+        'grupos whatsapp rh moçambique 2026',
+        'grupo whatsapp vagas emprego moçambique 2026',
+        'grupos whatsapp oportunidades emprego moçambique 2026',
+        
+        // TECNOLOGIA
+        'grupos whatsapp tecnologia moçambique 2026',
+        'grupo whatsapp programadores moçambique 2026',
+        'grupos whatsapp TI moçambique 2026',
+        'grupos whatsapp desenvolvedores moçambique 2026',
+        'grupo whatsapp tech mozambique 2026',
+        'grupos whatsapp informática moçambique 2026',
+        'grupo whatsapp hackers moçambique 2026',
+        'grupos whatsapp programação moçambique 2026',
+        
+        // EDUCAÇÃO
+        'grupos whatsapp estudantes moçambique 2026',
+        'grupo whatsapp universidade moçambique 2026',
+        'grupos whatsapp UEM moçambique 2026',
+        'grupo whatsapp UP moçambique 2026',
+        'grupos whatsapp faculdade moçambique 2026',
+        'grupo whatsapp escola moçambique 2026',
+        'grupos whatsapp cursos moçambique 2026',
+        'grupo whatsapp professores moçambique 2026',
+        
+        // IMÓVEIS
+        'grupos whatsapp imóveis moçambique 2026',
+        'grupo whatsapp casas maputo moçambique 2026',
+        'grupos whatsapp arrendamento moçambique 2026',
+        'grupo whatsapp aluguer moçambique 2026',
+        'grupos whatsapp apartamentos maputo moçambique 2026',
+        'grupo whatsapp terrenos moçambique 2026',
+        
+        // CARROS
+        'grupos whatsapp carros moçambique 2026',
+        'grupo whatsapp viaturas moçambique 2026',
+        'grupos whatsapp automóveis maputo moçambique 2026',
+        'grupo whatsapp stand moçambique 2026',
+        'grupos whatsapp veículos moçambique 2026',
+        'grupo whatsapp motos moçambique 2026',
+        'grupos whatsapp mecânica moçambique 2026',
+        
+        // MODA E BELEZA
+        'grupos whatsapp moda moçambique 2026',
+        'grupo whatsapp beleza moçambique 2026',
+        'grupos whatsapp capulanas moçambique 2026',
+        'grupo whatsapp boutique moçambique 2026',
+        'grupos whatsapp roupas moçambique 2026',
+        'grupo whatsapp salão moçambique 2026',
+        'grupos whatsapp cabelo moçambique 2026',
+        'grupo whatsapp maquiagem moçambique 2026',
+        
+        // COMIDA
+        'grupos whatsapp restaurantes moçambique 2026',
+        'grupo whatsapp comida moçambique 2026',
+        'grupos whatsapp delivery maputo moçambique 2026',
+        'grupo whatsapp gastronomia moçambique 2026',
+        'grupos whatsapp receitas moçambique 2026',
+        'grupo whatsapp chefs moçambique 2026',
+        
+        // EVENTOS E MÚSICA
+        'grupos whatsapp eventos moçambique 2026',
+        'grupo whatsapp festas maputo moçambique 2026',
+        'grupos whatsapp música moçambique 2026',
+        'grupo whatsapp marrabenta moçambique 2026',
+        'grupo whatsapp djs moçambique 2026',
+        'grupos whatsapp pandza moçambique 2026',
+        'grupo whatsapp artistas moçambique 2026',
+        
+        // SAÚDE
+        'grupos whatsapp saúde moçambique 2026',
+        'grupo whatsapp médicos moçambique 2026',
+        'grupos whatsapp enfermagem moçambique 2026',
+        'grupo whatsapp farmácia moçambique 2026',
+        'grupos whatsapp medicina moçambique 2026',
+        
+        // DESPORTO
+        'grupos whatsapp futebol moçambique 2026',
+        'grupo whatsapp desporto moçambique 2026',
+        'grupos whatsapp mambas moçambique 2026',
+        'grupo whatsapp liga moçambique 2026',
+        'grupos whatsapp ferroviário moçambique 2026',
+        'grupo whatsapp costa do sol moçambique 2026',
+        
+        // NAMORO E AMIZADE
+        'grupos whatsapp amizade moçambique 2026',
+        'grupo whatsapp namoro moçambique 2026',
+        'grupos whatsapp solteiros moçambique 2026',
+        'grupo whatsapp relacionamento moçambique 2026',
+        'grupos whatsapp date moçambique 2026',
+        'grupo whatsapp amor moçambique 2026',
+        
+        // BAIRROS MAPUTO
+        'grupos whatsapp sommerschield moçambique 2026',
+        'grupo whatsapp polana moçambique 2026',
+        'grupos whatsapp costa sol moçambique 2026',
+        'grupo whatsapp julius nyerere moçambique 2026',
+        'grupos whatsapp malhangalene moçambique 2026',
+        'grupo whatsapp xipamanine moçambique 2026',
+        'grupos whatsapp mafalala moçambique 2026',
+        'grupos whatsapp kamubukwana moçambique 2026',
+        'grupo whatsapp kampfumo moçambique 2026',
+        'grupos whatsapp kamaxakeni moçambique 2026',
+        'grupo whatsapp katembe moçambique 2026',
+        'grupos whatsapp kamanyola moçambique 2026',
+        'grupo whatsapp benfica moçambique 2026',
+        'grupos whatsapp munhuana moçambique 2026',
+        'grupo whatsapp bagamoyo moçambique 2026',
+        
+        // OUTRAS CIDADES
+        'grupo whatsapp angoche moçambique 2026',
+        'grupos whatsapp mocuba moçambique 2026',
+        'grupo whatsapp montepuez moçambique 2026',
+        'grupos whatsapp cuamba moçambique 2026',
+        'grupo whatsapp gurué moçambique 2026',
+        'grupos whatsapp ilha moçambique 2026',
+        'grupo whatsapp ressano garcia moçambique 2026',
+        'grupos whatsapp chokwé moçambique 2026',
+        
+        // SERVIÇOS
+        'grupos whatsapp serviços moçambique 2026',
+        'grupo whatsapp electricista moçambique 2026',
+        'grupos whatsapp canalizador moçambique 2026',
+        'grupo whatsapp pedreiro moçambique 2026',
+        'grupos whatsapp pintor moçambique 2026',
+        'grupo whatsapp jardineiro moçambique 2026',
+        'grupos whatsapp limpeza moçambique 2026',
+        'grupo whatsapp segurança moçambique 2026',
+        
+        // AGRICULTURA
+        'grupos whatsapp agricultura moçambique 2026',
+        'grupo whatsapp machamba moçambique 2026',
+        'grupos whatsapp agronegócio moçambique 2026',
+        'grupo whatsapp pecuária moçambique 2026',
+        
+        // TURISMO
+        'grupos whatsapp turismo moçambique 2026',
+        'grupo whatsapp viagens moçambique 2026',
+        'grupos whatsapp tofo moçambique 2026',
+        'grupo whatsapp vilankulo moçambique 2026',
+        'grupos whatsapp bazaruto moçambique 2026',
+        'grupos whatsapp hotéis moçambique 2026',
+        
+        // CONSTRUÇÃO
+        'grupos whatsapp construção moçambique 2026',
+        'grupo whatsapp obras moçambique 2026',
+        'grupos whatsapp engenharia moçambique 2026',
+        'grupo whatsapp arquitectura moçambique 2026',
+        
+        // TRANSPORTE
+        'grupos whatsapp transporte moçambique 2026',
+        'grupo whatsapp chapas maputo moçambique 2026',
+        'grupos whatsapp táxi moçambique 2026',
+        'grupo whatsapp uber moçambique 2026',
+        'grupos whatsapp bolt moçambique 2026',
+        
+        // FINANÇAS
+        'grupos whatsapp finanças moçambique 2026',
+        'grupo whatsapp investimentos moçambique 2026',
+        'grupos whatsapp forex moçambique 2026',
+        'grupo whatsapp bitcoin moçambique 2026',
+        'grupos whatsapp mpesa moçambique 2026',
+        'grupo whatsapp xitique moçambique 2026',
+        
+        // ARTE E FOTOGRAFIA
+        'grupo whatsapp pintura moçambique 2026',
+        'grupos whatsapp fotografia moçambique 2026',
+        'grupo whatsapp fotógrafos moçambique 2026',
+        
+        // MÍDIA
+        'grupos whatsapp jornalistas moçambique 2026',
+        'grupo whatsapp notícias moçambique 2026',
+        'grupos whatsapp imprensa moçambique 2026',
+        
+        // ONG E VOLUNTARIADO
+        'grupos whatsapp ong moçambique 2026',
+        'grupo whatsapp voluntariado moçambique 2026',
+        
+        // GRUPOS ESPECÍFICOS
+        'grupos whatsapp mulheres moçambique 2026',
+        'grupo whatsapp mães moçambique 2026',
+        'grupos whatsapp jovens moçambique 2026',
+        'grupo whatsapp juventude moçambique 2026',
+        
+        // POLÍTICA
+        'grupos whatsapp política moçambique 2026',
+        'grupo whatsapp frelimo moçambique 2026',
+        'grupos whatsapp renamo moçambique 2026',
+        'grupo whatsapp mdt moçambique 2026',
+        
+        // INDÚSTRIA
+        'grupos whatsapp indústria moçambique 2026',
+        'grupo whatsapp fábrica moçambique 2026',
+        'grupos whatsapp produção moçambique 2026',
+        
+        // PETS
+        'grupos whatsapp pets moçambique 2026',
+        'grupo whatsapp cães moçambique 2026',
+        'grupos whatsapp gatos moçambique 2026',
+        'grupo whatsapp animais moçambique 2026',
+        
+        // GAMES
+        'grupos whatsapp gamers moçambique 2026',
+        'grupo whatsapp jogos moçambique 2026',
+        'grupos whatsapp fifa moçambique 2026',
+        'grupo whatsapp pes moçambique 2026',
+        'grupos whatsapp playstation moçambique 2026',
+        
+        // DIVERSOS
+        'whatsapp mozambique join 2026',
+        'mozambique whatsapp link 2026',
+        'link grupo whatsapp moçambique 2026',
+        'convite grupo whatsapp moçambique 2026',
+        'entrar grupo whatsapp moçambique 2026',
+        'grupos whatsapp diversão moçambique 2026',
+        'grupo whatsapp entretenimento moçambique 2026',
+        'grupos whatsapp humor moçambique 2026',
+        'grupo whatsapp memes moçambique 2026',
+        'grupos whatsapp projetos moçambique 2026',
+        'grupo whatsapp aeroporto maputo moçambique 2026',
+        'whatsapp groups mozambique business 2026',
+        'mozambique whatsapp groups 2026',
+        'maputo whatsapp groups moçambique 2026',
+        'beira whatsapp groups moçambique 2026',
+        'nampula whatsapp groups moçambique 2026',
+        'grupos telegram moçambique 2026',
+        'grupo telegram maputo moçambique 2026',
+        
+        // APOSTAS / BETS
+        'grupos whatsapp bets moçambique 2026',
+        'grupo whatsapp betting moçambique 2026',
+        'grupos whatsapp milabet moçambique 2026',
+        'grupo whatsapp elephantbet moçambique 2026',
+        'grupos whatsapp apostas moçambique 2026',
+        'grupo whatsapp odd moçambique 2026',
+        'grupos whatsapp odds moçambique 2026',
+        'grupo whatsapp prognósticos moçambique 2026',
+        'grupos whatsapp premier bet moçambique 2026',
+        'grupo whatsapp betclic moçambique 2026',
+        'grupos whatsapp apostas desportivas moçambique 2026',
+        
+        // RELACIONAMENTO E AMIZADE
+        'grupos whatsapp bom relacionamento moçambique 2026',
+        'grupo whatsapp novas amizades moçambique 2026',
+        'grupos whatsapp amizades moçambique 2026',
+        'grupo whatsapp fazer amigos moçambique 2026',
+        'grupos whatsapp conhecer pessoas moçambique 2026',
+        
+        // FILMES E ANIMES
+        'grupos whatsapp filmes moçambique 2026',
+        'grupo whatsapp animes moçambique 2026',
+        'grupos whatsapp series moçambique 2026',
+        'grupo whatsapp anime mozambique 2026',
+        'grupos whatsapp filmes e series moçambique 2026',
+        'grupo whatsapp otaku moçambique 2026',
+        
+        // FREE FIRE E GAMES
+        'grupos whatsapp free fire moçambique 2026',
+        'grupo whatsapp freefire mocambique 2026',
+        'grupos whatsapp ff moçambique 2026',
+        'grupo whatsapp free fire maputo moçambique 2026',
+        'grupos whatsapp diamantes free fire moçambique 2026',
+        'grupo whatsapp diamantes ff moçambique 2026',
+        'grupos whatsapp recarga diamantes moçambique 2026',
+        
+        // INTERNET / MB / MEGAS
+        'grupos whatsapp venda de mb moçambique 2026',
+        'grupo whatsapp venda de megas moçambique 2026',
+        'grupos whatsapp recarga de mb moçambique 2026',
+        'grupo whatsapp internet moçambique 2026',
+        'grupos whatsapp dados móveis moçambique 2026',
+        'grupo whatsapp megas vodacom moçambique 2026',
+        'grupos whatsapp megas movitel moçambique 2026',
+        'grupo whatsapp megas tmcel moçambique 2026',
+        'grupos whatsapp venda de saldo moçambique 2026',
+        'grupo whatsapp venda de saldo mpesa moçambique 2026',
+        'grupos whatsapp recargas moçambique 2026',
+        'grupo whatsapp pacotes internet moçambique 2026',
+        
+        // APOSTAS - AVIATOR
+        'grupos whatsapp aviator moçambique 2026',
+        'grupo whatsapp aviator mz moçambique 2026',
+        'grupos whatsapp sinais aviator moçambique 2026',
+        
+        // MEGAS VODACOM / NETGIGA (BUSCA DIRETA COM LINK)
+        'chat.whatsapp.com grupos de megas moçambique',
+        'chat.whatsapp.com megas vodacom moçambique',
+        'chat.whatsapp.com internet vodacom moçambique',
+        'chat.whatsapp.com netgiga vodacom moçambique',
+        'grupos de megas moçambique 2026',
+        'megas vodacom 1gb 25mt moçambique 2026',
+        'megas vodacom preço moçambique 2026',
+        'internet vodacom moçambique 2026',
+        'netgiga vodacom moçambique 2026',
+        'grupo whatsapp netgiga moçambique 2026',
+        'grupos whatsapp megas baratos moçambique 2026',
+        'grupo whatsapp giga vodacom moçambique 2026',
+        'chat.whatsapp.com venda de mb moçambique',
+        'chat.whatsapp.com recarga movitel moçambique',
+        'chat.whatsapp.com recarga tmcel moçambique'
+    ];
+    
+    const stats = {
+        inicio: new Date(),
+        pesquisas: 0,
+        linksTotal: 0
+    };
+    
+    const CONFIG = {
+        scroll: 3,
+        verificacao: 4000,
+        linksPorArquivo: 1000,
+        tempoSemLinks: 120000, // 2 minutos
+        autoDownload: false,
+        apiEndpoint: 'https://whabot-gemini.onrender.com/api/links' // API REST do Whabot no Render
+    };
+    
+    const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';
+    
+    // ═══ ENVIAR AUTOMATICAMENTE PARA A API DO WHABOT NO RENDER ═══
+    function enviarParaApiWhabot(linksArray) {
+        if (!linksArray || linksArray.length === 0) return;
+        try {
+            fetch(CONFIG.apiEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ links: linksArray })
+            }).then(r => r.json()).then(res => {
+                console.log('🚀 [WHABOT API] Sent ' + linksArray.length + ' links to Render! Response:', res);
+            }).catch(err => {
+                console.log('⚠️ [WHABOT API] Error sending links to API:', err.message);
+            });
+        } catch(e) {
+            // Ignora erros de rede se estiver offline
+        }
+    }
+    
+    // ═══ SALVAR PROGRESSO NO LOCALSTORAGE ═══
+    function salvarProgresso() {
+        try {
+            const dados = {
+                links: Array.from(linksColetados),
+                linksSalvos: linksSalvos,
+                contadorArquivos: contadorArquivos,
+                pesquisaAtual: pesquisaAtual
+            };
+            localStorage.setItem(CHAVE_SALVAMENTO, JSON.stringify(dados));
+        } catch(e) {
+            console.log('⚠️ Erro ao salvar progresso:', e.message);
+        }
+    }
+    
+    // ═══ CARREGAR PROGRESSO SALVO ═══
+    function carregarProgresso() {
+        try {
+            const raw = localStorage.getItem(CHAVE_SALVAMENTO);
+            if (!raw) return false;
+            
+            const dados = JSON.parse(raw);
+            
+            if (dados.links && dados.links.length > 0) {
+                linksColetados = new Set(dados.links);
+            }
+            linksSalvos = dados.linksSalvos || 0;
+            contadorArquivos = dados.contadorArquivos || 0;
+            pesquisaAtual = dados.pesquisaAtual || 0;
+            
+            console.log('📂 PROGRESSO ANTERIOR ENCONTRADO!');
+            console.log('   Links já coletados: ' + linksColetados.size);
+            console.log('   Pesquisa: ' + (pesquisaAtual + 1) + '/' + TERMOS.length);
+            console.log('   Continuando de onde parou...');
+            
+            return true;
+        } catch(e) {
+            console.log('⚠️ Erro ao carregar progresso:', e.message);
+            return false;
+        }
+    }
+    
+    // ═══ BUSCAR CAMPO ═══
+    function getCampo() {
+        const seletores = [
+            'input[type="search"]',
+            'input[placeholder*="Pesquisar"]',
+            'input[placeholder*="Search"]',
+            'input[aria-label*="Pesquisar"]',
+            'input[aria-label*="Search"]',
+            'input[role="combobox"]',
+            'input[autocomplete="off"]',
+            'textarea[placeholder*="Pesquisar"]',
+            'input[name="q"]'
+        ];
+        
+        for (let i = 0; i < seletores.length; i++) {
+            const campo = document.querySelector(seletores[i]);
+            if (campo && campo.offsetParent !== null) {
+                console.log('✅ Campo encontrado: ' + seletores[i]);
+                return campo;
+            }
+        }
+        
+        console.log('❌ Nenhum campo de pesquisa encontrado!');
+        return null;
+    }
+    
+    // ═══ DIGITAR REAL ═══
+    function digitarTexto(elemento, texto, callback) {
+        elemento.focus();
+        
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(elemento, '');
+        elemento.dispatchEvent(new Event('input', { bubbles: true }));
+        
+        let i = 0;
+        
+        function digitarLetra() {
+            if (i < texto.length) {
+                const textoAtual = texto.substring(0, i + 1);
+                nativeInputValueSetter.call(elemento, textoAtual);
+                elemento.dispatchEvent(new Event('input', { bubbles: true }));
+                i++;
+                setTimeout(digitarLetra, 50 + Math.random() * 100);
+            } else {
+                elemento.dispatchEvent(new Event('change', { bubbles: true }));
+                callback();
+            }
+        }
+        
+        setTimeout(digitarLetra, 100);
+    }
+    
+    // ═══ CLICAR DE VERDADE NO CAMPO ═══
+    function clicarCampo(elemento, callback) {
+        const rect = elemento.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        
+        function dispararSequenciaClique() {
+            const opts = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: x,
+                clientY: y
+            };
+            
+            ['pointerover', 'pointerenter', 'mouseover', 'mouseenter',
+             'pointerdown', 'mousedown',
+             'pointerup', 'mouseup',
+             'click'].forEach(function(tipo) {
+                try {
+                    const EventClass = tipo.startsWith('pointer') ? PointerEvent : MouseEvent;
+                    elemento.dispatchEvent(new EventClass(tipo, opts));
+                } catch(e) {
+                    elemento.dispatchEvent(new MouseEvent(tipo, opts));
+                }
+            });
+            
+            elemento.focus();
+        }
+        
+        dispararSequenciaClique();
+        
+        let tentativas = 0;
+        function verificarFoco() {
+            tentativas++;
+            if (document.activeElement === elemento) {
+                console.log('✅ Cursor confirmado no campo (tentativa ' + tentativas + ')');
+                callback();
+            } else if (tentativas < 15) {
+                console.log('🔁 Foco não confirmado, tentando de novo...');
+                dispararSequenciaClique();
+                setTimeout(verificarFoco, 150);
+            } else {
+                console.log('⚠️ Não confirmou foco após 15 tentativas, prosseguindo mesmo assim');
+                callback();
+            }
+        }
+        
+        setTimeout(verificarFoco, 150);
+    }
+    
+    // ═══ ENTER REAL ═══
+    function darEnter(elemento, tentativa) {
+        tentativa = tentativa || 1;
+        console.log('⏎ Confirmando cursor antes de dar ENTER... (tentativa ' + tentativa + ')');
+        
+        clicarCampo(elemento, function() {
+            if (document.activeElement !== elemento) {
+                elemento.focus();
+            }
+            
+            console.log('⏎ Dando ENTER REAL no campo...');
+            
+            elemento.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true
+            }));
+            
+            elemento.dispatchEvent(new KeyboardEvent('keypress', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true
+            }));
+            
+            elemento.dispatchEvent(new KeyboardEvent('keyup', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true
+            }));
+            
+            console.log('✅ Enter REAL disparado (3 eventos)');
+            
+            if (tentativa < 3) {
+                const urlAntes = location.href;
+                setTimeout(function() {
+                    if (location.href === urlAntes && elemento.value.length > 0) {
+                        console.log('🔁 Parece que o Enter não pesquisou, tentando de novo...');
+                        darEnter(elemento, tentativa + 1);
+                    }
+                }, 1500);
+            }
+        });
+    }
+    
+    // ═══ PESQUISAR ═══
+    function pesquisar() {
+        if (pesquisaAtual >= TERMOS.length) {
+            ativo = false;
+            console.log('✅ TODAS AS PESQUISAS CONCLUÍDAS!');
+            return;
+        }
+        
+        estadoAtual = 'PESQUISANDO';
+        ultimoLinkEncontrado = Date.now();
+        
+        const campo = getCampo();
+        if (!campo) {
+            console.log('❌ Campo de pesquisa não encontrado!');
+            ativo = false;
+            return;
+        }
+        
+        const termo = TERMOS[pesquisaAtual];
+        console.log('🔍 Pesquisando [' + (pesquisaAtual + 1) + '/' + TERMOS.length + ']: ' + termo);
+        
+        campo.value = '';
+        
+        clicarCampo(campo, function() {
+            console.log('⌨️ Digitando...');
+            digitarTexto(campo, termo, function() {
+                console.log('✅ Texto completo digitado!');
+                
+                setTimeout(function() {
+                    darEnter(campo);
+                    
+                    setTimeout(function() {
+                        estadoAtual = 'COLETANDO';
+                        stats.pesquisas++;
+                        console.log('📥 Iniciando coleta de links...');
+                    }, 3000);
+                }, 800);
+            });
+        });
+    }
+    
+    // ═══ CLICAR EM "VER MAIS" ═══
+    function expandirVerMais() {
+        let cliques = 0;
+        const termos = ['ver mais', 'see more', 'ver más'];
+        const candidatos = document.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+        
+        candidatos.forEach(function(el) {
+            const texto = (el.textContent || '').trim().toLowerCase();
+            if (termos.includes(texto)) {
+                try {
+                    el.click();
+                    cliques++;
+                } catch(e) {}
+            }
+        });
+        
+        if (cliques > 0) {
+            console.log('👁️ ' + cliques + ' "Ver mais" clicado(s)');
+        }
+        
+        return cliques;
+    }
+    
+    // ═══ EXTRAIR LINKS ═══
+    function extrair() {
+        expandirVerMais();
+        const novos = [];
+        
+        document.querySelectorAll('a[href*="chat.whatsapp.com"]').forEach(function(a) {
+            processar(a.href, novos);
+        });
+        
+        const html = document.body.innerHTML;
+        const matches = html.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/gi);
+        if (matches) {
+            matches.forEach(function(m) {
+                processar(m, novos);
+            });
+        }
+        
+        if (novos.length > 0) {
+            ultimoLinkEncontrado = Date.now();
+            console.log('✨ +' + novos.length + ' links novos! Total: ' + linksColetados.size);
+            salvarProgresso();
+            // Envia os novos links diretamente para a API REST do Whabot no Render!
+            enviarParaApiWhabot(novos);
+        }
+        
+        return novos;
+    }
+    
+    function processar(txt, arr) {
+        const m = txt.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/i);
+        if (!m) return;
+        
+        const link = 'https://' + m[0];
+        
+        if (!linksColetados.has(link)) {
+            linksColetados.add(link);
+            arr.push(link);
+            stats.linksTotal++;
+            return true;
+        }
+        return false;
+    }
+    
+    // ═══ SALVAR EM TXT ═══
+    function salvar(todos) {
+        const arr = Array.from(linksColetados);
+        if (arr.length === 0) {
+            console.log('⚠️ Nenhum link para salvar!');
+            return;
+        }
+        
+        let lista, nome;
+        
+        if (todos) {
+            lista = arr;
+            nome = 'Grupos_WhatsApp_Mocambique_2026_COMPLETO.txt';
+        } else {
+            const i = linksSalvos;
+            const f = Math.min(i + CONFIG.linksPorArquivo, arr.length);
+            lista = arr.slice(i, f);
+            
+            if (lista.length === 0) return;
+            
+            contadorArquivos++;
+            linksSalvos = f;
+            nome = 'Grupos_WhatsApp_Mocambique_Parte' + contadorArquivos + '.txt';
+        }
+        
+        let txt = '═══════════════════════════════════════════════════\n';
+        txt += '        GRUPOS WHATSAPP - MOÇAMBIQUE 2026\n';
+        txt += '═══════════════════════════════════════════════════\n\n';
+        txt += 'Total de Grupos: ' + lista.length + '\n';
+        txt += 'Data: ' + new Date().toLocaleDateString('pt-PT') + '\n';
+        txt += 'Hora: ' + new Date().toLocaleTimeString('pt-PT') + '\n\n';
+        txt += '═══════════════════════════════════════════════════\n\n';
+        
+        lista.forEach(function(link, i) {
+            const n = todos ? (i + 1) : (linksSalvos - lista.length + i + 1);
+            txt += 'Link ' + n + ':\n' + link + '\n\n';
+        });
+        
+        txt += '═══════════════════════════════════════════════════\n';
+        txt += '                    FIM\n';
+        txt += '═══════════════════════════════════════════════════\n';
+        
+        const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nome;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+        console.log('💾 Arquivo salvo: ' + nome);
+    }
+    
+    // ═══ SCROLL ═══
+    function scroll() {
+        if (ativo && estadoAtual === 'COLETANDO') {
+            window.scrollBy(0, CONFIG.scroll);
+        }
+        requestAnimationFrame(scroll);
+    }
+    scroll();
+    
+    // ═══ CICLO ═══
+    function ciclo() {
+        if (!ativo) return;
+        
+        if (estadoAtual === 'COLETANDO') {
+            extrair();
+            
+            if (Date.now() - ultimoLinkEncontrado > CONFIG.tempoSemLinks) {
+                console.log('⏱️ Timeout atingido, próxima pesquisa...');
+                pesquisaAtual++;
+                salvarProgresso();
+                setTimeout(pesquisar, 2000);
+                return;
+            }
+            
+            if (CONFIG.autoDownload && linksColetados.size - linksSalvos >= CONFIG.linksPorArquivo) {
+                salvar(false);
+            }
+        }
+    }
+    
+    setInterval(ciclo, CONFIG.verificacao);
+    setInterval(salvarProgresso, 15000);
+    window.addEventListener('beforeunload', salvarProgresso);
+    window.addEventListener('pagehide', salvarProgresso);
+    
+    // ═══ COMANDOS FIXOS (CONSOLE) ═══
+    window.PARAR = function() { ativo = false; salvarProgresso(); console.log('🛑 PARADO (progresso salvo)'); };
+    window.BAIXAR = function() { salvar(true); };
+    window.LIMPAR = function() { localStorage.removeItem(CHAVE_SALVAMENTO); console.log('🗑️ Progresso apagado.'); };
+    window.LIGAR_DOWNLOAD = function() { CONFIG.autoDownload = true; console.log('📥 Auto-download LIGADO.'); };
+    window.DESLIGAR_DOWNLOAD = function() { CONFIG.autoDownload = false; console.log('🔇 Auto-download DESLIGADO.'); };
+    window.VER = function() {
+        const arr = Array.from(linksColetados);
+        if (arr.length === 0) { console.log('⚠️ Nenhum link coletado.'); return; }
+        console.log('📚 BASE DE LINKS - ' + arr.length + ' GRUPOS');
+        arr.forEach((l, i) => console.log((i + 1) + '. ' + l));
+    };
+    window.STATS = function() {
+        const min = Math.floor((Date.now() - stats.inicio) / 60000);
+        console.log('📊 ESTATÍSTICAS | Estado: ' + estadoAtual + ' | Termo: ' + (pesquisaAtual + 1) + '/' + TERMOS.length + ' | Links: ' + linksColetados.size + ' | Tempo: ' + min + 'm');
+    };
+    window.PULAR = function() { pesquisaAtual++; pesquisar(); console.log('⏭️ PULADO'); };
+    window.IR = function(n) { if (!n || n < 1 || n > TERMOS.length) return; pesquisaAtual = n - 1; salvarProgresso(); pesquisar(); };
+    
+    console.log('═══════════════════════════════════════════════════');
+    console.log('🇲🇿 COLETOR + INTEGRAÇÃO WHABOT API MOÇAMBIQUE 2026');
+    console.log('═══════════════════════════════════════════════════');
+    
+    carregarProgresso();
+    setTimeout(pesquisar, 2000);
+})();
