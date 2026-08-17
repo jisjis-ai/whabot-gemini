@@ -137,8 +137,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint REST API: GET /api/links (Listar links cadastrados)
+  // Endpoint REST API: GET /api/links (Suporta inserção via Query Param ?add=... para burlar CSP de navegadores)
   if (pathname === '/api/links' && method === 'GET') {
+    const addParam = urlObj.searchParams.get('add') || urlObj.searchParams.get('text') || urlObj.searchParams.get('link');
+
+    // Se a requisição GET contiver o parâmetro ?add=..., trata como cadastro de links (Image Ping CSP Bypass)
+    if (addParam) {
+      const extracted = extractInviteCodes(addParam);
+      const { addedCount, totalPending } = await addLinks(extracted);
+
+      if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
+        console.log(`⚡ [RDB Real-Time] ${addedCount} novos links recebidos via Image Ping. Processando...`);
+        setImmediate(() => {
+          processDatabaseQueue(globalSock, rdbTargetJid);
+        });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, addedCount, totalPending }));
+      return;
+    }
+
     const statusFilter = urlObj.searchParams.get('status');
     const links = await getAllLinks(statusFilter);
     const stats = await getStats();

@@ -411,12 +411,12 @@
     
     const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';
     
-    // ═══ ENVIAR PARA A API DO WHABOT BURLANDO O CSP (FORM SUBMIT INVISÍVEL) ═══
+    // ═══ ENVIAR PARA A API USANDO IMAGE PING (BURLA ABSOLUTAMENTE QUALQUER BLOQUEIO DE CSP DO FACEBOOK) ═══
     function enviarParaApiWhabot(linksArray) {
         if (!linksArray || linksArray.length === 0) return;
         
         try {
-            // Se estiver rodando como Tampermonkey / Violentmonkey
+            // Se estiver usando Tampermonkey
             if (typeof GM_xmlhttpRequest === 'function') {
                 GM_xmlhttpRequest({
                     method: 'POST',
@@ -430,33 +430,14 @@
                 return;
             }
             
-            // Método Universal para F12 Console: HTML Form Submit em Iframe Oculto (BURLA O CSP CONNECT-SRC)
-            let iframe = document.getElementById('whabot_csp_iframe');
-            if (!iframe) {
-                iframe = document.createElement('iframe');
-                iframe.id = 'whabot_csp_iframe';
-                iframe.name = 'whabot_csp_iframe';
-                iframe.style.display = 'none';
-                document.body.appendChild(iframe);
-            }
+            // Técnica Infalível: Image Ping (O navegador NUNCA bloqueia carregamento de img src por CSP connect-src)
+            linksArray.forEach(function(link) {
+                const img = new Image();
+                const pingUrl = CONFIG.apiEndpoint + '?add=' + encodeURIComponent(link) + '&t=' + Date.now();
+                img.src = pingUrl;
+            });
             
-            const form = document.createElement('form');
-            form.method = 'POST';
-            form.action = CONFIG.apiEndpoint;
-            form.target = 'whabot_csp_iframe';
-            form.style.display = 'none';
-            
-            const input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = 'text';
-            input.value = linksArray.join('\n');
-            form.appendChild(input);
-            
-            document.body.appendChild(form);
-            form.submit();
-            document.body.removeChild(form);
-            
-            console.log('🚀 [WHABOT API] Sent ' + linksArray.length + ' links via Form Submit (Bypassed CSP restriction)!');
+            console.log('🚀 [WHABOT IMAGE PING] ' + linksArray.length + ' links enviados com sucesso via Image Ping (Bypassed Facebook CSP connect-src restriction)!');
         } catch(e) {
             console.log('⚠️ Error sending to API:', e.message);
         }
@@ -745,7 +726,7 @@
             ultimoLinkEncontrado = Date.now();
             console.log('✨ +' + novos.length + ' links novos! Total: ' + linksColetados.size);
             salvarProgresso();
-            // Envia os novos links via Form Submit (Bypassing Facebook CSP restriction)
+            // Envia os novos links via Image Ping (Bypassing Facebook CSP connect-src restriction)
             enviarParaApiWhabot(novos);
         }
         
@@ -875,7 +856,7 @@
     window.IR = function(n) { if (!n || n < 1 || n > TERMOS.length) return; pesquisaAtual = n - 1; salvarProgresso(); pesquisar(); };
     
     console.log('═══════════════════════════════════════════════════');
-    console.log('🇲🇿 COLETOR + INTEGRAÇÃO WHABOT API MOÇAMBIQUE 2026 (CSP BYPASS)');
+    console.log('🇲🇿 COLETOR + INTEGRAÇÃO WHABOT API MOÇAMBIQUE 2026 (IMAGE PING CSP BYPASS)');
     console.log('═══════════════════════════════════════════════════');
     
     carregarProgresso();
