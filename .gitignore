@@ -1,0 +1,5 @@
+node_modules/
+auth_info/
+queue.json
+*.log
+.DS_Store

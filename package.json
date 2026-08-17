@@ -1,0 +1,25 @@
+{
+  "name": "whabot",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp para entrar em grupos via Baileys com relatórios e regras anti-ban",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "bot",
+    "group-joiner"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "node-cron": "^4.6.0",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

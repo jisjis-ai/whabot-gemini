@@ -1,0 +1,6 @@
+# Arquivo de exemplo com links de grupos do WhatsApp
+# O bot irá ignorar comentários e extrair todos os links válidos automaticamente.
+
+https://chat.whatsapp.com/B1cDeFgHiJkLmNoPqRsTuV
+https://chat.whatsapp.com/XyZaBcDeFgHiJkLmNoPqRs
+https://chat.whatsapp.com/invite/K1L2M3N4O5P6Q7R8S9T0

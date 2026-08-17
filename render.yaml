@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: whabot-group-joiner
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: whabot-data
+      mountPath: /var/data
+      sizeGB: 1
