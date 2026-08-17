@@ -346,6 +346,58 @@ async function startBot() {
         const lowerText = trimmedText.toLowerCase();
 
         // ---------------------------------------------------------
+        // 0. COMANDO: !menu / !ajuda / !help
+        // ---------------------------------------------------------
+        if (lowerText === '!menu' || lowerText === '!ajuda' || lowerText === '!help') {
+          const stats = await getStats();
+          const menuText = `🤖 *WHABOT - MENU DE COMANDOS*
+
+📥 *Entrada em Grupos:*
+• \`!entrar <links>\` : Cadastra os links (ou anexo .txt) e entra em velocidade rápida (${config.minDelaySeconds}-${config.maxDelaySeconds}s).
+• \`!entrar db\` : Processa todos os grupos pendentes no Banco de Dados.
+• \`!entrar rdb\` : Alterna o modo **Tempo Real (RDB)**. Cada link inserido via API REST entra imediatamente!
+
+📊 *Estatísticas no Banco de Dados:*
+• \`!status\` / \`!stats\` : Exibe resumo dos grupos no PostgreSQL.
+  - Pendentes: *${stats.pending}*
+  - Sucessos: *${stats.success}*
+  - Falhas: *${stats.failed}*
+  - Total: *${stats.total}*
+
+🗑️ *Gerenciamento de Dados:*
+• \`!delete\` / \`!deletar db\` : Solicita a exclusão dos links do banco.
+• \`!confirmar delete\` : Confirma a exclusão definitiva (válido por 60s).
+
+🌐 *API REST (Render):*
+• \`POST https://whabot-gemini.onrender.com/api/links\`
+• \`GET https://whabot-gemini.onrender.com/api/links\`
+
+_Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
+
+          await sock.sendMessage(fromJid, { text: menuText });
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 0.1 COMANDO: !status / !stats
+        // ---------------------------------------------------------
+        if (lowerText === '!status' || lowerText === '!stats') {
+          const stats = await getStats();
+          const statusText = `📊 *ESTATÍSTICAS DO BANCO DE DADOS*
+
+• ⏳ Pendentes: *${stats.pending}*
+• ✅ Sucessos: *${stats.success}*
+• ❌ Falhas: *${stats.failed}*
+• 🛑 Limite Temporário: *${stats.rate_limited}*
+• 📁 Total Cadastrado: *${stats.total}*
+
+⚡ Modo Real-Time DB (RDB): *${rdbModeEnabled ? 'ATIVADO' : 'DESATIVADO'}*`;
+
+          await sock.sendMessage(fromJid, { text: statusText });
+          continue;
+        }
+
+        // ---------------------------------------------------------
         // 1. COMANDO: !confirmar delete (Executa a limpeza no DB)
         // ---------------------------------------------------------
         if (lowerText === '!confirmar delete') {
@@ -481,7 +533,7 @@ async function startBot() {
 
           if (uniqueLinks.length === 0) {
             await sock.sendMessage(fromJid, {
-              text: `⚠️ Nenhum link de grupo válido do WhatsApp foi encontrado.\n\n*Comandos Disponíveis:*\n• \`!entrar <links>\` - Adiciona e entra nos links\n• \`!entrar db\` - Entra nos grupos pendentes do Banco de Dados\n• \`!entrar rdb\` - Ativa entrada em tempo real via API REST\n• \`!delete\` - Apaga o banco de dados (exige confirmação)`
+              text: `⚠️ Nenhum link de grupo válido do WhatsApp foi encontrado.\n\nDigite \`!menu\` para ver a lista de comandos disponíveis.`
             });
             continue;
           }
