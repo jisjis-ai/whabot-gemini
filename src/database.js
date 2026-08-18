@@ -10,8 +10,42 @@ export const pool = new Pool({
   connectionString,
   ssl: {
     rejectUnauthorized: false
-  }
+  },
+  max: 10, // Máximo de conexões no pool
+  idleTimeoutMillis: 30000, // Fecha conexões ociosas após 30 segundos
+  connectionTimeoutMillis: 10000 // Timeout de 10 segundos ao tentar conectar
 });
+
+// Trata erros de conexões ociosas caindo no banco do Render para não derrubar a aplicação
+pool.on('error', (err) => {
+  console.error('⚠️ [PostgreSQL Pool Warning] Conexão ociosa descartada pelo banco:', err.message);
+});
+
+/**
+ * Função utilitária para executar consultas com auto-retry caso a conexão caia
+ */
+async function executeWithRetry(fn, retries = 3) {
+  let attempt = 0;
+  while (attempt < retries) {
+    attempt++;
+    try {
+      return await fn();
+    } catch (err) {
+      const isConnError =
+        err.message.includes('terminated unexpectedly') ||
+        err.message.includes('closed') ||
+        err.message.includes('timeout') ||
+        err.code === '57P01';
+
+      if (isConnError && attempt < retries) {
+        console.warn(`⚠️ Conexão PostgreSQL oscilou (tentativa ${attempt}/${retries}). Reconectando em 1s...`);
+        await new Promise((r) => setTimeout(r, 1000));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 /**
  * Inicializa a tabela de links no PostgreSQL se não existir
@@ -30,9 +64,14 @@ export async function initDb() {
     );
   `;
   try {
-    const client = await pool.connect();
-    await client.query(query);
-    client.release();
+    await executeWithRetry(async () => {
+      const client = await pool.connect();
+      try {
+        await client.query(query);
+      } finally {
+        client.release();
+      }
+    });
     console.log('🐘 PostgreSQL conectado e tabela group_links pronta!');
   } catch (err) {
     console.error('❌ Erro ao conectar/inicializar banco PostgreSQL:', err.message);
@@ -51,27 +90,33 @@ export async function addLinks(items) {
   }
 
   let addedCount = 0;
-  const client = await pool.connect();
 
   try {
-    await client.query('BEGIN');
-    for (const item of items) {
-      const res = await client.query(
-        `INSERT INTO group_links (code, url, status) 
-         VALUES ($1, $2, 'pending') 
-         ON CONFLICT (code) DO NOTHING;`,
-        [item.code, item.url]
-      );
-      if (res.rowCount > 0) {
-        addedCount++;
+    await executeWithRetry(async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const item of items) {
+          const res = await client.query(
+            `INSERT INTO group_links (code, url, status) 
+             VALUES ($1, $2, 'pending') 
+             ON CONFLICT (code) DO NOTHING;`,
+            [item.code, item.url]
+          );
+          if (res.rowCount > 0) {
+            addedCount++;
+          }
+        }
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
       }
-    }
-    await client.query('COMMIT');
+    });
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('Erro ao adicionar links no PostgreSQL:', err.message);
-  } finally {
-    client.release();
   }
 
   const totalPending = await getPendingCount();
@@ -84,10 +129,12 @@ export async function addLinks(items) {
  */
 export async function getPendingLinks() {
   try {
-    const res = await pool.query(
-      `SELECT id, code, url FROM group_links WHERE status = 'pending' ORDER BY id ASC;`
-    );
-    return res.rows;
+    return await executeWithRetry(async () => {
+      const res = await pool.query(
+        `SELECT id, code, url FROM group_links WHERE status = 'pending' ORDER BY id ASC;`
+      );
+      return res.rows;
+    });
   } catch (err) {
     console.error('Erro ao buscar links pendentes no PostgreSQL:', err.message);
     return [];
@@ -100,8 +147,10 @@ export async function getPendingLinks() {
  */
 export async function getPendingCount() {
   try {
-    const res = await pool.query(`SELECT COUNT(*)::int as count FROM group_links WHERE status = 'pending';`);
-    return res.rows[0]?.count || 0;
+    return await executeWithRetry(async () => {
+      const res = await pool.query(`SELECT COUNT(*)::int as count FROM group_links WHERE status = 'pending';`);
+      return res.rows[0]?.count || 0;
+    });
   } catch (err) {
     return 0;
   }
@@ -116,12 +165,14 @@ export async function getPendingCount() {
  */
 export async function updateLinkStatus(code, status, groupName = '', reason = '') {
   try {
-    await pool.query(
-      `UPDATE group_links 
-       SET status = $1, group_name = $2, reason = $3, updated_at = NOW() 
-       WHERE code = $4;`,
-      [status, groupName, reason, code]
-    );
+    await executeWithRetry(async () => {
+      await pool.query(
+        `UPDATE group_links 
+         SET status = $1, group_name = $2, reason = $3, updated_at = NOW() 
+         WHERE code = $4;`,
+        [status, groupName, reason, code]
+      );
+    });
   } catch (err) {
     console.error(`Erro ao atualizar status do código ${code}:`, err.message);
   }
@@ -132,16 +183,18 @@ export async function updateLinkStatus(code, status, groupName = '', reason = ''
  */
 export async function getStats() {
   try {
-    const res = await pool.query(`
-      SELECT 
-        COUNT(*)::int as total,
-        COUNT(*) FILTER (WHERE status = 'pending')::int as pending,
-        COUNT(*) FILTER (WHERE status = 'success')::int as success,
-        COUNT(*) FILTER (WHERE status = 'failed')::int as failed,
-        COUNT(*) FILTER (WHERE status = 'rate_limited')::int as rate_limited
-      FROM group_links;
-    `);
-    return res.rows[0];
+    return await executeWithRetry(async () => {
+      const res = await pool.query(`
+        SELECT 
+          COUNT(*)::int as total,
+          COUNT(*) FILTER (WHERE status = 'pending')::int as pending,
+          COUNT(*) FILTER (WHERE status = 'success')::int as success,
+          COUNT(*) FILTER (WHERE status = 'failed')::int as failed,
+          COUNT(*) FILTER (WHERE status = 'rate_limited')::int as rate_limited
+        FROM group_links;
+      `);
+      return res.rows[0];
+    });
   } catch (err) {
     return { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
   }
@@ -153,9 +206,11 @@ export async function getStats() {
  */
 export async function deleteAllLinks() {
   try {
-    const res = await pool.query(`DELETE FROM group_links;`);
-    console.log(`🗑️ ${res.rowCount} links excluídos do PostgreSQL.`);
-    return res.rowCount;
+    return await executeWithRetry(async () => {
+      const res = await pool.query(`DELETE FROM group_links;`);
+      console.log(`🗑️ ${res.rowCount} links excluídos do PostgreSQL.`);
+      return res.rowCount;
+    });
   } catch (err) {
     console.error('Erro ao deletar links do PostgreSQL:', err.message);
     return 0;
@@ -167,19 +222,21 @@ export async function deleteAllLinks() {
  */
 export async function getAllLinks(statusFilter = null) {
   try {
-    if (statusFilter) {
+    return await executeWithRetry(async () => {
+      if (statusFilter) {
+        const res = await pool.query(
+          `SELECT id, code, url, status, group_name, reason, created_at, updated_at 
+           FROM group_links WHERE status = $1 ORDER BY id DESC;`,
+          [statusFilter]
+        );
+        return res.rows;
+      }
       const res = await pool.query(
         `SELECT id, code, url, status, group_name, reason, created_at, updated_at 
-         FROM group_links WHERE status = $1 ORDER BY id DESC;`,
-        [statusFilter]
+         FROM group_links ORDER BY id DESC LIMIT 500;`
       );
       return res.rows;
-    }
-    const res = await pool.query(
-      `SELECT id, code, url, status, group_name, reason, created_at, updated_at 
-       FROM group_links ORDER BY id DESC LIMIT 500;`
-    );
-    return res.rows;
+    });
   } catch (err) {
     console.error('Erro ao listar links:', err.message);
     return [];
