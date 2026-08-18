@@ -87,7 +87,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint REST API: POST /api/links (Cadastrar novos links no Banco de Dados)
+  // Endpoint REST API: POST /api/links (Cadastrar novos links no Banco de Dados + Fila Local)
   if (pathname === '/api/links' && method === 'POST') {
     let bodyText = '';
     req.on('data', (chunk) => {
@@ -109,13 +109,29 @@ const server = http.createServer(async (req, res) => {
         }
 
         const extracted = extractInviteCodes(textToParse);
-        const { addedCount, totalPending } = await addLinks(extracted);
+        
+        // Salva na fila local sempre como garantia
+        const localRes = queueManager.addToQueue(extracted, rdbTargetJid || 'api@system');
 
-        // Se o modo RDB estiver ativo e houver socket do bot, dispara o processamento em tempo real!
+        // Tenta salvar também no PostgreSQL se disponível
+        let dbAddedCount = 0;
+        let dbTotalPending = 0;
+        try {
+          const dbRes = await addLinks(extracted);
+          dbAddedCount = dbRes.addedCount;
+          dbTotalPending = dbRes.totalPending;
+        } catch (dbErr) {
+          console.warn('⚠️ Falha ao salvar no PostgreSQL (usando fila local):', dbErr.message);
+        }
+
+        const addedCount = dbAddedCount || localRes.addedCount;
+        const totalPending = dbTotalPending || localRes.totalPending;
+
+        // Se o modo RDB estiver ativo, dispara o processamento em tempo real
         if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
           console.log(`⚡ [RDB Real-Time] ${addedCount} novos links detectados via API. Processando em tempo real...`);
           setImmediate(() => {
-            processDatabaseQueue(globalSock, rdbTargetJid);
+            processHybridQueue(globalSock, rdbTargetJid);
           });
         }
 
@@ -141,15 +157,28 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/links' && method === 'GET') {
     const addParam = urlObj.searchParams.get('add') || urlObj.searchParams.get('text') || urlObj.searchParams.get('link');
 
-    // Se a requisição GET contiver o parâmetro ?add=..., trata como cadastro de links (Image Ping CSP Bypass)
     if (addParam) {
       const extracted = extractInviteCodes(addParam);
-      const { addedCount, totalPending } = await addLinks(extracted);
+      
+      const localRes = queueManager.addToQueue(extracted, rdbTargetJid || 'api@system');
+      let dbAddedCount = 0;
+      let dbTotalPending = 0;
+
+      try {
+        const dbRes = await addLinks(extracted);
+        dbAddedCount = dbRes.addedCount;
+        dbTotalPending = dbRes.totalPending;
+      } catch (dbErr) {
+        console.warn('⚠️ Falha no DB GET Ping (usando fila local):', dbErr.message);
+      }
+
+      const addedCount = dbAddedCount || localRes.addedCount;
+      const totalPending = dbTotalPending || localRes.totalPending;
 
       if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
         console.log(`⚡ [RDB Real-Time] ${addedCount} novos links recebidos via Image Ping. Processando...`);
         setImmediate(() => {
-          processDatabaseQueue(globalSock, rdbTargetJid);
+          processHybridQueue(globalSock, rdbTargetJid);
         });
       }
 
@@ -159,17 +188,31 @@ const server = http.createServer(async (req, res) => {
     }
 
     const statusFilter = urlObj.searchParams.get('status');
-    const links = await getAllLinks(statusFilter);
-    const stats = await getStats();
+    let links = [];
+    let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+
+    try {
+      links = await getAllLinks(statusFilter);
+      stats = await getStats();
+    } catch (err) {
+      links = queueManager.getPendingItems();
+      stats = { total: links.length, pending: links.length, success: 0, failed: 0, rate_limited: 0 };
+    }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true, stats, count: links.length, data: links }));
     return;
   }
 
-  // Endpoint REST API: DELETE /api/links (Limpar banco via API)
+  // Endpoint REST API: DELETE /api/links (Limpar banco e fila via API)
   if (pathname === '/api/links' && method === 'DELETE') {
-    const count = await deleteAllLinks();
+    let count = 0;
+    try {
+      count = await deleteAllLinks();
+    } catch (e) {}
+    queueManager.data.pending = [];
+    queueManager.saveQueue();
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true, deletedCount: count }));
     return;
@@ -179,7 +222,14 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
 
   if (isConnected) {
-    const stats = await getStats();
+    let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+    try {
+      stats = await getStats();
+    } catch (e) {
+      const pending = queueManager.getPendingItems().length;
+      stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
+    }
+
     res.end(`
       <!DOCTYPE html>
       <html>
@@ -201,10 +251,10 @@ const server = http.createServer(async (req, res) => {
             <div class="badge">✅ WhatsApp Conectado</div>
             <span class="rdb-badge">${rdbModeEnabled ? '⚡ RDB Ativo' : '⏹️ RDB Inativo'}</span>
             <h2>Whabot Group Joiner</h2>
-            <p>Bot operando via PostgreSQL e API REST (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
+            <p>Bot operando via Híbrido (PostgreSQL + Fallback Fila Local) (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
             
             <div class="grid">
-              <div class="box">Pendentes no DB: <span>${stats.pending}</span></div>
+              <div class="box">Pendentes: <span>${stats.pending}</span></div>
               <div class="box">Sucessos: <span>${stats.success}</span></div>
               <div class="box">Falhas: <span>${stats.failed}</span></div>
               <div class="box">Total Geral: <span>${stats.total}</span></div>
@@ -270,12 +320,16 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, async () => {
   console.log(`🌐 Servidor Web & API REST rodando na porta ${PORT}`);
-  await initDb();
+  try {
+    await initDb();
+  } catch (err) {
+    console.warn('⚠️ PostgreSQL offline na inicialização, usando fila local de contingência.');
+  }
 });
 
 async function startBot() {
   console.log('--------------------------------------------------');
-  console.log('🚀 Inicializando Bot WhatsApp de Entrada Rápida em Grupos');
+  console.log('🚀 Inicializando Bot WhatsApp de Entrada Rápida em Grupos (Modo Híbrido)');
   console.log('--------------------------------------------------');
 
   const baseDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
@@ -330,11 +384,11 @@ async function startBot() {
       isConnected = true;
       latestQR = null;
       console.log('✅ Conexão estabelecida com sucesso com o WhatsApp!');
-      console.log(`🤖 Bot ativo com banco de dados PostgreSQL.`);
+      console.log(`🤖 Bot ativo (Suporte duplo PostgreSQL + Fila Local).`);
 
-      // Cron Job para verificar pendentes no banco a cada 3 minutos
+      // Cron Job para verificar pendentes a cada 3 minutos
       cron.schedule('*/3 * * * *', () => {
-        checkScheduledDbQueue(sock);
+        checkScheduledHybridQueue(sock);
       });
     }
   });
@@ -368,23 +422,30 @@ async function startBot() {
         // 0. COMANDO: !menu / !ajuda / !help
         // ---------------------------------------------------------
         if (lowerText === '!menu' || lowerText === '!ajuda' || lowerText === '!help') {
-          const stats = await getStats();
+          let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+          try {
+            stats = await getStats();
+          } catch (e) {
+            const pending = queueManager.getPendingItems().length;
+            stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
+          }
+
           const menuText = `🤖 *WHABOT - MENU DE COMANDOS*
 
 📥 *Entrada em Grupos:*
 • \`!entrar <links>\` : Cadastra os links (ou anexo .txt) e entra em velocidade rápida (${config.minDelaySeconds}-${config.maxDelaySeconds}s).
-• \`!entrar db\` : Processa todos os grupos pendentes no Banco de Dados.
+• \`!entrar db\` : Processa todos os grupos pendentes no Banco/Fila.
 • \`!entrar rdb\` : Alterna o modo **Tempo Real (RDB)**. Cada link inserido via API REST entra imediatamente!
 
 📊 *Estatísticas no Banco de Dados:*
-• \`!status\` / \`!stats\` : Exibe resumo dos grupos no PostgreSQL.
+• \`!status\` / \`!stats\` : Exibe resumo dos grupos.
   - Pendentes: *${stats.pending}*
   - Sucessos: *${stats.success}*
   - Falhas: *${stats.failed}*
   - Total: *${stats.total}*
 
 🗑️ *Gerenciamento de Dados:*
-• \`!delete\` / \`!deletar db\` : Solicita a exclusão dos links do banco.
+• \`!delete\` / \`!deletar db\` : Solicita a exclusão dos links.
 • \`!confirmar delete\` : Confirma a exclusão definitiva (válido por 60s).
 
 🌐 *API REST (Render):*
@@ -401,8 +462,15 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         // 0.1 COMANDO: !status / !stats
         // ---------------------------------------------------------
         if (lowerText === '!status' || lowerText === '!stats') {
-          const stats = await getStats();
-          const statusText = `📊 *ESTATÍSTICAS DO BANCO DE DADOS*
+          let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+          try {
+            stats = await getStats();
+          } catch (e) {
+            const pending = queueManager.getPendingItems().length;
+            stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
+          }
+
+          const statusText = `📊 *ESTATÍSTICAS DO SISTEMA*
 
 • ⏳ Pendentes: *${stats.pending}*
 • ✅ Sucessos: *${stats.success}*
@@ -417,15 +485,21 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         }
 
         // ---------------------------------------------------------
-        // 1. COMANDO: !confirmar delete (Executa a limpeza no DB)
+        // 1. COMANDO: !confirmar delete (Executa a limpeza)
         // ---------------------------------------------------------
         if (lowerText === '!confirmar delete') {
           const limitTime = deletePendingMap.get(fromJid);
           if (limitTime && Date.now() <= limitTime) {
             deletePendingMap.delete(fromJid);
-            const deletedCount = await deleteAllLinks();
+            let deletedCount = 0;
+            try {
+              deletedCount = await deleteAllLinks();
+            } catch (e) {}
+            queueManager.data.pending = [];
+            queueManager.saveQueue();
+
             await sock.sendMessage(fromJid, {
-              text: `🗑️ *Banco de Dados Limpo!*\n\nForam excluídos *${deletedCount}* registros do banco de dados PostgreSQL.`
+              text: `🗑️ *Banco de Dados e Fila Limpos!*\n\nForam excluídos os registros do banco de dados e da fila local.`
             });
           } else {
             deletePendingMap.delete(fromJid);
@@ -440,7 +514,7 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         // 2. COMANDO: !delete ou !deletar db (Trava com Confirmação)
         // ---------------------------------------------------------
         if (lowerText === '!delete' || lowerText === '!deletar db') {
-          deletePendingMap.set(fromJid, Date.now() + 60000); // Válido por 60s
+          deletePendingMap.set(fromJid, Date.now() + 60000);
           await sock.sendMessage(fromJid, {
             text: `⚠️ *ATENÇÃO: Confirmação de Exclusão*\n\nVocê solicitou apagar TODOS os links salvos no banco de dados.\n\nPara confirmar a exclusão definitiva, envie o comando abaixo em até *60 segundos*:\n👉 *\`!confirmar delete\`*`
           });
@@ -455,14 +529,19 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
           rdbTargetJid = fromJid;
 
           if (rdbModeEnabled) {
-            const pendingCount = await getPendingCount();
+            let pendingCount = 0;
+            try {
+              pendingCount = await getPendingCount();
+            } catch (e) {
+              pendingCount = queueManager.getPendingItems().length;
+            }
+
             await sock.sendMessage(fromJid, {
-              text: `⚡ *Modo Real-Time DB (RDB) ATIVADO!*\n\nCada novo link cadastrado no banco de dados via API REST (\`POST /api/links\`) será processado **imediatamente** em tempo real.\n\n• Links pendentes no banco atualmente: *${pendingCount}*\nOs relatórios serão enviados nesta conversa.`
+              text: `⚡ *Modo Real-Time DB (RDB) ATIVADO!*\n\nCada novo link cadastrado no banco de dados ou via API REST será processado **imediatamente** em tempo real.\n\n• Links pendentes atualmente: *${pendingCount}*\nOs relatórios serão enviados nesta conversa.`
             });
 
-            // Se já houver pendentes no banco, inicia o processamento imediato
             if (pendingCount > 0) {
-              await processDatabaseQueue(sock, fromJid);
+              await processHybridQueue(sock, fromJid);
             }
           } else {
             await sock.sendMessage(fromJid, {
@@ -473,27 +552,35 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         }
 
         // ---------------------------------------------------------
-        // 4. COMANDO: !entrar db (Processar Links Pendentes do DB)
+        // 4. COMANDO: !entrar db (Processar Links Pendentes)
         // ---------------------------------------------------------
         if (lowerText === '!entrar db') {
-          const pendingCount = await getPendingCount();
-          if (pendingCount === 0) {
+          let pendingCount = 0;
+          try {
+            pendingCount = await getPendingCount();
+          } catch (e) {
+            pendingCount = queueManager.getPendingItems().length;
+          }
+
+          if (pendingCount === 0 && queueManager.getPendingItems().length === 0) {
             await sock.sendMessage(fromJid, {
-              text: `ℹ️ *Banco de Dados sem Links Pendentes*\n\nNão há grupos com status \`pending\` no banco de dados no momento.`
+              text: `ℹ️ *Sem Links Pendentes*\n\nNão há grupos pendentes no banco de dados ou na fila local no momento.`
             });
             continue;
           }
 
+          const totalShow = Math.max(pendingCount, queueManager.getPendingItems().length);
+
           await sock.sendMessage(fromJid, {
-            text: `📊 *Processamento de Banco de Dados*\n\n• Links pendentes no DB: *${pendingCount}*\nIniciando entradas em velocidade máxima (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay)...`
+            text: `📊 *Processamento de Grupos*\n\n• Links pendentes: *${totalShow}*\nIniciando entradas em velocidade máxima (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay)...`
           });
 
-          await processDatabaseQueue(sock, fromJid);
+          await processHybridQueue(sock, fromJid);
           continue;
         }
 
         // ---------------------------------------------------------
-        // 5. COMANDO: !entrar <links> (Modo padrão: cadastra no DB e processa)
+        // 5. COMANDO: !entrar <links> (Modo padrão: cadastra e processa)
         // ---------------------------------------------------------
         if (trimmedText.startsWith(config.prefix)) {
           console.log(`\n📩 Comando ${config.prefix} recebido de: ${senderJid}`);
@@ -557,14 +644,28 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
             continue;
           }
 
-          // Adiciona os links no banco PostgreSQL
-          const { addedCount, totalPending } = await addLinks(uniqueLinks);
+          // Salva na fila local sempre como contingência
+          const localRes = queueManager.addToQueue(uniqueLinks, fromJid);
+
+          // Tenta salvar também no PostgreSQL
+          let dbAdded = 0;
+          let dbPending = 0;
+          try {
+            const dbRes = await addLinks(uniqueLinks);
+            dbAdded = dbRes.addedCount;
+            dbPending = dbRes.totalPending;
+          } catch (dbErr) {
+            console.warn('⚠️ Falha ao salvar no PostgreSQL (usando fila local):', dbErr.message);
+          }
+
+          const addedCount = dbAdded || localRes.addedCount;
+          const totalPending = dbPending || localRes.totalPending;
 
           await sock.sendMessage(fromJid, {
-            text: `📥 *Links Registrados no Banco de Dados*\n\n• Novos links inseridos: *${addedCount}*\n• Total pendente no DB: *${totalPending}*\n\nIniciando o processamento...`
+            text: `📥 *Links Registrados*\n\n• Novos links inseridos: *${addedCount}*\n• Total pendente: *${totalPending}*\n\nIniciando o processamento...`
           });
 
-          await processDatabaseQueue(sock, fromJid);
+          await processHybridQueue(sock, fromJid);
         }
       }
     } catch (err) {
@@ -574,25 +675,44 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
 }
 
 /**
- * Processa os links com status 'pending' diretamente do banco de dados PostgreSQL
+ * Processa os links pendentes usando modo Híbrido: tenta PostgreSQL primeiro,
+ * e se falhar/estiver offline, usa a fila local queue.json sem interromper a execução!
  * @param {import('@whiskeysockets/baileys').WASocket} sock 
  * @param {string} targetJid 
  */
-async function processDatabaseQueue(sock, targetJid) {
+async function processHybridQueue(sock, targetJid) {
   if (isProcessing) {
     console.log('⏳ O processamento da fila já está em execução.');
     return;
   }
 
-  // Buscar todos os links pendentes no PostgreSQL
-  const pendingLinks = await getPendingLinks();
+  let pendingLinks = [];
+  let isUsingLocalFallback = false;
+
+  // 1. Tentar buscar do PostgreSQL
+  try {
+    pendingLinks = await getPendingLinks();
+  } catch (err) {
+    console.warn('⚠️ Falha ao consultar PostgreSQL. Alternando para fila local de contingência:', err.message);
+    isUsingLocalFallback = true;
+  }
+
+  // 2. Se o DB falhar ou retornar vazio mas houver itens na fila local
   if (pendingLinks.length === 0) {
-    console.log('✅ Nenhum grupo pendente no PostgreSQL.');
+    const localItems = queueManager.getPendingItems();
+    if (localItems.length > 0) {
+      pendingLinks = localItems;
+      isUsingLocalFallback = true;
+    }
+  }
+
+  if (pendingLinks.length === 0) {
+    console.log('✅ Nenhum grupo pendente no Banco ou na Fila Local.');
     return;
   }
 
   isProcessing = true;
-  console.log(`\n⚡ Processando ${pendingLinks.length} links pendentes do Banco de Dados PostgreSQL...`);
+  console.log(`\n⚡ Processando ${pendingLinks.length} links pendentes (${isUsingLocalFallback ? 'Fila Local' : 'PostgreSQL'})...`);
 
   const batchResults = [];
   let limitReached = false;
@@ -613,7 +733,15 @@ async function processDatabaseQueue(sock, targetJid) {
 
     if (result.success) {
       console.log(`   ✅ Sucesso! Entrou no grupo: "${result.groupName}"`);
-      await updateLinkStatus(item.code, 'success', result.groupName, result.reason || 'Entrada efetuada');
+
+      // Atualiza DB se possível
+      try {
+        await updateLinkStatus(item.code, 'success', result.groupName, result.reason || 'Entrada efetuada');
+      } catch (e) {}
+
+      // Atualiza fila local
+      queueManager.markProcessed(item.code, 'success', result.reason, result.groupName);
+
       batchResults.push({
         code: item.code,
         url: item.url,
@@ -625,8 +753,11 @@ async function processDatabaseQueue(sock, targetJid) {
       console.log(`   ❌ Falha! Motivo: ${result.reason}`);
 
       if (result.isRateLimited) {
-        console.log('⚠️ Detectado Rate Limit do WhatsApp. Mantendo link no DB e pausando...');
-        await updateLinkStatus(item.code, 'rate_limited', result.groupName, result.reason);
+        console.log('⚠️ Detectado Rate Limit do WhatsApp. Mantendo link e pausando...');
+        try {
+          await updateLinkStatus(item.code, 'rate_limited', result.groupName, result.reason);
+        } catch (e) {}
+
         batchResults.push({
           code: item.code,
           url: item.url,
@@ -638,8 +769,11 @@ async function processDatabaseQueue(sock, targetJid) {
         scheduledNextRun = queueManager.scheduleNextBatch(config.rescheduleHours);
         break;
       } else {
-        // Falha definitiva (ex: link inválido, revogado, grupo cheio)
-        await updateLinkStatus(item.code, 'failed', result.groupName, result.reason);
+        try {
+          await updateLinkStatus(item.code, 'failed', result.groupName, result.reason);
+        } catch (e) {}
+        queueManager.markProcessed(item.code, 'failed', result.reason, result.groupName);
+
         batchResults.push({
           code: item.code,
           url: item.url,
@@ -651,7 +785,12 @@ async function processDatabaseQueue(sock, targetJid) {
     }
   }
 
-  const remainingPending = await getPendingCount();
+  let remainingPending = 0;
+  try {
+    remainingPending = await getPendingCount();
+  } catch (e) {
+    remainingPending = queueManager.getPendingItems().length;
+  }
 
   if (targetJid) {
     const reportText = generateReport({
@@ -663,7 +802,7 @@ async function processDatabaseQueue(sock, targetJid) {
 
     try {
       await sock.sendMessage(targetJid, { text: reportText });
-      console.log('📊 Relatório do banco de dados enviado com sucesso.');
+      console.log('📊 Relatório enviado com sucesso.');
     } catch (err) {
       console.error('Erro ao enviar relatório:', err.message);
     }
@@ -673,15 +812,21 @@ async function processDatabaseQueue(sock, targetJid) {
 }
 
 /**
- * Função executada pelo Cron para verificar se há links pendentes no DB
+ * Função executada pelo Cron para verificar se há links pendentes
  */
-async function checkScheduledDbQueue(sock) {
+async function checkScheduledHybridQueue(sock) {
   if (isProcessing) return;
-  const pendingCount = await getPendingCount();
+  let pendingCount = 0;
+  try {
+    pendingCount = await getPendingCount();
+  } catch (e) {
+    pendingCount = queueManager.getPendingItems().length;
+  }
+
   if (pendingCount > 0 && !queueManager.isScheduledWaitActive()) {
-    console.log(`⏰ Cron detectou ${pendingCount} links pendentes no DB. Processando...`);
+    console.log(`⏰ Cron detectou ${pendingCount} links pendentes. Processando...`);
     if (rdbTargetJid) {
-      await processDatabaseQueue(sock, rdbTargetJid);
+      await processHybridQueue(sock, rdbTargetJid);
     }
   }
 }
