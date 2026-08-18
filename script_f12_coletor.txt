@@ -406,7 +406,7 @@
         linksPorArquivo: 1000,
         tempoSemLinks: 120000, // 2 minutos
         autoDownload: false,
-        apiEndpoint: 'https://whabot-gemini.onrender.com/api/links'
+        apiEndpoint: 'https://whabot-gemini-48ty.onrender.com/api/links'
     };
     
     const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';

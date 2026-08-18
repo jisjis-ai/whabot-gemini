@@ -449,8 +449,8 @@ async function startBot() {
 • \`!confirmar delete\` : Confirma a exclusão definitiva (válido por 60s).
 
 🌐 *API REST (Render):*
-• \`POST https://whabot-gemini.onrender.com/api/links\`
-• \`GET https://whabot-gemini.onrender.com/api/links\`
+• \`POST https://whabot-gemini-48ty.onrender.com/api/links\`
+• \`GET https://whabot-gemini-48ty.onrender.com/api/links\`
 
 _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
 
