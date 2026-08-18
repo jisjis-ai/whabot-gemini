@@ -4,7 +4,7 @@ const { Pool } = pg;
 
 const connectionString =
   process.env.DATABASE_URL ||
-  'postgresql://links_banco_db_user:bHU9Njk8QHtHvKlrfJQ7UgzSVHnxMFMk@dpg-da1lsstbedkc73buphk0-a.oregon-postgres.render.com/links_banco_db';
+  'postgresql://rdb_11ww_user:XZwi9aNOlPCiwyV3HuYizJ7RBsnDFALe@dpg-da1umt7lk1mc73ad5nlg-a.oregon-postgres.render.com/rdb_11ww';
 
 export const pool = new Pool({
   connectionString,
