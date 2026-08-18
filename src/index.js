@@ -399,24 +399,103 @@ async function startBot() {
       if (m.type !== 'notify') return;
 
       for (const msg of m.messages) {
-        if (!msg.message || (msg.key.fromMe && !config.allowAllAdmins)) continue;
+        if (!msg.message) continue;
+
+        // Ignora mensagens enviadas pelo próprio bot
+        if (msg.key.fromMe) continue;
 
         const fromJid = msg.key.remoteJid;
         const senderJid = msg.key.participant || msg.key.remoteJid;
-
-        if (config.adminJids.length > 0 && !config.adminJids.includes(senderJid.split('@')[0])) {
-          continue;
-        }
 
         const textContent =
           msg.message.conversation ||
           msg.message.extendedTextMessage?.text ||
           msg.message.documentMessage?.caption ||
           msg.message.imageMessage?.caption ||
+          msg.message.videoMessage?.caption ||
+          msg.message.buttonsResponseMessage?.selectedDisplayText ||
+          msg.message.listResponseMessage?.title ||
           '';
 
         const trimmedText = textContent.trim();
         const lowerText = trimmedText.toLowerCase();
+
+        // =========================================================
+        // 🔥 AUTO-CAPTURA: Detecta links de grupo em TODA mensagem
+        // (grupos, PV, qualquer conversa) — entra imediatamente!
+        // =========================================================
+        const autoLinks = extractInviteCodes(trimmedText);
+        if (autoLinks.length > 0) {
+          console.log(`\n🔗 [AUTO-CAPTURA] ${autoLinks.length} link(s) detectado(s) em mensagem de ${senderJid}`);
+
+          for (const item of autoLinks) {
+            // Evita entrar no mesmo grupo duas vezes (verifica DB + fila)
+            let jaExiste = false;
+            try {
+              const { addedCount } = await addLinks([item]);
+              if (addedCount === 0) {
+                jaExiste = true; // Já estava no banco (UNIQUE constraint)
+              }
+            } catch (e) {
+              const localRes = queueManager.addToQueue([item], fromJid);
+              if (localRes.addedCount === 0) jaExiste = true;
+            }
+
+            if (jaExiste) {
+              console.log(`   ⏭️ Grupo já registrado, ignorando: ${item.url}`);
+              continue;
+            }
+
+            console.log(`   ⚡ Entrando automaticamente: ${item.url}`);
+            const result = await joinGroup(sock, item.code);
+
+            if (result.success) {
+              console.log(`   ✅ Entrou: "${result.groupName}"`);
+              try { await updateLinkStatus(item.code, 'success', result.groupName, 'Auto-captura'); } catch(e) {}
+              queueManager.markProcessed(item.code, 'success', 'Auto-captura', result.groupName);
+
+              // Reage com ✅ para confirmar ao remetente
+              try {
+                await sock.sendMessage(fromJid, {
+                  react: { text: '✅', key: msg.key }
+                });
+              } catch(e) {}
+
+            } else if (result.isRateLimited) {
+              console.log(`   ⏳ Rate limit ao entrar: ${item.url}. Colocado na fila.`);
+              try { await updateLinkStatus(item.code, 'rate_limited', '', result.reason); } catch(e) {}
+              // Reage com ⏳
+              try {
+                await sock.sendMessage(fromJid, {
+                  react: { text: '⏳', key: msg.key }
+                });
+              } catch(e) {}
+            } else {
+              console.log(`   ❌ Falha ao entrar: ${result.reason}`);
+              try { await updateLinkStatus(item.code, 'failed', '', result.reason); } catch(e) {}
+              queueManager.markProcessed(item.code, 'failed', result.reason, '');
+
+              // Reage com ❌ para links inválidos/expirados
+              try {
+                await sock.sendMessage(fromJid, {
+                  react: { text: '❌', key: msg.key }
+                });
+              } catch(e) {}
+            }
+
+            // Pequeno delay entre links se vieram vários juntos
+            if (autoLinks.length > 1) {
+              await sleep(getRandomDelay(config.minDelaySeconds, config.maxDelaySeconds));
+            }
+          }
+
+          // Após auto-captura, continua para verificar se também é um comando
+        }
+
+        // Filtro de administradores para comandos
+        if (config.adminJids.length > 0 && !config.adminJids.includes(senderJid.split('@')[0])) {
+          continue;
+        }
 
         // ---------------------------------------------------------
         // 0. COMANDO: !menu / !ajuda / !help
