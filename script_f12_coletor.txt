@@ -74,6 +74,59 @@
         'grupo whatsapp jovens igreja moçambique 2026',
         'grupos whatsapp ministério moçambique 2026',
         
+        // IMPORTAÇÕES
+        'grupos whatsapp importação moçambique 2026',
+        'grupo whatsapp importação moçambique 2026',
+        'grupos whatsapp importadores moçambique 2026',
+        'grupo whatsapp importadores maputo moçambique 2026',
+        'grupos whatsapp china moçambique 2026',
+        'grupo whatsapp fornecedores china moçambique 2026',
+        'grupos whatsapp shein moçambique 2026',
+        'grupo whatsapp alibaba moçambique 2026',
+        'grupos whatsapp aliexpress moçambique 2026',
+        'grupo whatsapp 1688 moçambique 2026',
+        'grupos whatsapp encomendas rsa moçambique 2026',
+        'grupo whatsapp compras áfrica do sul moçambique 2026',
+        'grupos whatsapp compras tanzania moçambique 2026',
+        'grupo whatsapp frete carga moçambique 2026',
+        'grupos whatsapp despachantes moçambique 2026',
+        'grupo whatsapp alfândega moçambique 2026',
+        'grupos whatsapp contentor moçambique 2026',
+        'grupo whatsapp revendedores moçambique 2026',
+        'grupos whatsapp turquia moçambique 2026',
+        'grupo whatsapp dubai moçambique importação 2026',
+        'grupos whatsapp importação direta moçambique 2026',
+
+        // VENDA DE CARROS
+        'grupos whatsapp venda de carros moçambique 2026',
+        'grupo whatsapp carros moçambique 2026',
+        'grupos whatsapp carros maputo moçambique 2026',
+        'grupo whatsapp stand de carros moçambique 2026',
+        'grupos whatsapp compra venda carros moçambique 2026',
+        'grupo whatsapp carros usados moçambique 2026',
+        'grupos whatsapp carros japão moçambique 2026',
+        'grupo whatsapp beward carros moçambique 2026',
+        'grupos whatsapp toyota moçambique 2026',
+        'grupo whatsapp nissan honda mazda moçambique 2026',
+        'grupos whatsapp automobilismo moçambique 2026',
+        'grupo whatsapp mecânica peças carros moçambique 2026',
+        'grupos whatsapp carros beira moçambique 2026',
+        'grupo whatsapp carros nampula moçambique 2026',
+        'grupos whatsapp importação carros moçambique 2026',
+
+        // XITIQUE & POUPANÇA
+        'grupo whatsapp xitique moçambique 2026',
+        'grupos whatsapp xitique moçambique 2026',
+        'grupo whatsapp xitique geral moçambique 2026',
+        'grupos whatsapp xitique rotativo moçambique 2026',
+        'grupo whatsapp xitique de dinheiro moçambique 2026',
+        'grupos whatsapp xitique mensal moçambique 2026',
+        'grupo whatsapp xitique semanal moçambique 2026',
+        'grupos whatsapp xitique de compras moçambique 2026',
+        'grupo whatsapp xitique maputo moçambique 2026',
+        'grupos whatsapp poupança e crédito moçambique 2026',
+        'grupo whatsapp empréstimos mpesa moçambique 2026',
+
         // NEGÓCIOS
         'grupos whatsapp negócios moçambique 2026',
         'grupo whatsapp negocios mocambique 2026',
@@ -88,6 +141,10 @@
         'grupos whatsapp vendedores moçambique 2026',
         'grupo whatsapp exportação moçambique 2026',
         'grupos whatsapp oportunidades moçambique 2026',
+        'grupos whatsapp negocios mz 2026',
+        'grupo whatsapp vendas mz 2026',
+        'grupos whatsapp classificados moçambique 2026',
+        'grupo whatsapp olx moçambique 2026',
         
         // EMPREGOS
         'grupos whatsapp empregos moçambique 2026',
@@ -721,15 +778,16 @@
     function expandirVerMais() {
         let cliques = 0;
         const termos = ['ver mais', 'see more', 'ver más'];
-        const candidatos = document.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
-        
-        candidatos.forEach(function(el) {
-            const texto = (el.textContent || '').trim().toLowerCase();
-            if (termos.includes(texto)) {
-                try {
-                    el.click();
-                    cliques++;
-                } catch(e) {}
+        document.querySelectorAll('div, span, a').forEach(function(el) {
+            if (el.children.length === 0) {
+                const texto = (el.textContent || '').trim().toLowerCase();
+                if (termos.includes(texto)) {
+                    try {
+                        const clicavel = el.closest('div[role="button"], span[role="button"], a') || el;
+                        clicavel.click();
+                        cliques++;
+                    } catch(e) {}
+                }
             }
         });
         
@@ -740,35 +798,46 @@
         return cliques;
     }
     
-    // ═══ EXTRAIR LINKS (com deduplicação de posts já vistos) ═══
+    let contactosColetados = new Set();
+    let linksVistosConsole = new Set();
+
+    // ═══ EXTRAIR CONTACTOS MOÇAMBIQUE ═══
+    function extrairContactos() {
+        const texto = document.body.innerText || '';
+        const regex = /(?:\+?258\s*|(?:\b))?(8[234567]\d{7})\b/g;
+        let match;
+        let novos = 0;
+
+        while ((match = regex.exec(texto)) !== null) {
+            const numCompleto = '+258' + match[1];
+            if (!contactosColetados.has(numCompleto)) {
+                contactosColetados.add(numCompleto);
+                novos++;
+                console.log('📱 [NOVO CONTACTO MZ]: ' + numCompleto);
+            }
+        }
+        if (novos > 0) salvarProgresso();
+    }
+
+    // ═══ EXTRAIR LINKS ═══
     function extrair() {
         expandirVerMais();
+        extrairContactos();
         const novos = [];
 
-        // Pega TODOS os posts visíveis e verifica o data-id para evitar repetição
-        document.querySelectorAll('[data-pagelet], [data-testid], [role="article"]').forEach(function(post) {
-            // Gera um ID único para o post baseado em atributos do DOM
-            const postId = post.getAttribute('data-pagelet') ||
-                           post.getAttribute('data-testid') ||
-                           post.getAttribute('aria-posinset') ||
-                           post.innerHTML.substring(0, 80); // Fallback: primeiros 80 chars do HTML
-
-            if (postId && postsVistos.has(postId)) return; // Já processou este post
-            if (postId) postsVistos.add(postId);
-
-            // Extrai links dentro do post
-            post.querySelectorAll('a[href*="chat.whatsapp.com"]').forEach(function(a) {
-                processar(a.href, novos);
-            });
-            const textoPost = post.innerHTML || '';
-            const m = textoPost.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/gi);
-            if (m) m.forEach(function(match) { processar(match, novos); });
-        });
-
-        // Fallback: varrer toda a página para links soltos
+        // Extrai de todos os links <a href="...">
         document.querySelectorAll('a[href*="chat.whatsapp.com"]').forEach(function(a) {
             processar(a.href, novos);
         });
+
+        // Extrai do HTML total da página
+        const html = document.body.innerHTML;
+        const matches = html.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/gi);
+        if (matches) {
+            matches.forEach(function(m) {
+                processar(m, novos);
+            });
+        }
 
         if (novos.length > 0) {
             ultimoLinkEncontrado = Date.now();
@@ -790,7 +859,13 @@
             linksColetados.add(link);
             arr.push(link);
             stats.linksTotal++;
+            console.log('✨ [NOVO LINK]: ' + link);
             return true;
+        } else {
+            if (!linksVistosConsole.has(link)) {
+                linksVistosConsole.add(link);
+                console.log('⏭️ [LINK JÁ CONHECIDO (PULANDO)]: ' + link);
+            }
         }
         return false;
     }
@@ -900,6 +975,12 @@
     window.LIMPAR = function() { localStorage.removeItem(CHAVE_SALVAMENTO); console.log('🗑️ Progresso apagado.'); };
     window.LIGAR_DOWNLOAD = function() { CONFIG.autoDownload = true; console.log('📥 Auto-download LIGADO.'); };
     window.DESLIGAR_DOWNLOAD = function() { CONFIG.autoDownload = false; console.log('🔇 Auto-download DESLIGADO.'); };
+    window.CONTACTOS = function() {
+        const arr = Array.from(contactosColetados);
+        if (arr.length === 0) { console.log('⚠️ Nenhum contacto coletado.'); return; }
+        console.log('📱 CONTACTOS MOÇAMBIQUE - ' + arr.length + ' NÚMEROS');
+        arr.forEach((n, i) => console.log((i + 1) + '. ' + n));
+    };
     window.VER = function() {
         const arr = Array.from(linksColetados);
         if (arr.length === 0) { console.log('⚠️ Nenhum link coletado.'); return; }

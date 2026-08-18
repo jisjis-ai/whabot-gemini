@@ -127,8 +127,8 @@ const server = http.createServer(async (req, res) => {
         const addedCount = dbAddedCount || localRes.addedCount;
         const totalPending = dbTotalPending || localRes.totalPending;
 
-        // Se o modo RDB estiver ativo, dispara o processamento em tempo real
-        if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
+        // Se o modo RDB estiver ativo e NÃO estiver em pausa por rate limit, dispara o processamento
+        if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid && !queueManager.isScheduledWaitActive()) {
           console.log(`⚡ [RDB Real-Time] ${addedCount} novos links detectados via API. Processando em tempo real...`);
           setImmediate(() => {
             processHybridQueue(globalSock, rdbTargetJid);
@@ -175,7 +175,7 @@ const server = http.createServer(async (req, res) => {
       const addedCount = dbAddedCount || localRes.addedCount;
       const totalPending = dbTotalPending || localRes.totalPending;
 
-      if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid) {
+      if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid && !queueManager.isScheduledWaitActive()) {
         console.log(`⚡ [RDB Real-Time] ${addedCount} novos links recebidos via Image Ping. Processando...`);
         setImmediate(() => {
           processHybridQueue(globalSock, rdbTargetJid);
@@ -746,6 +746,20 @@ async function processHybridQueue(sock, targetJid) {
     return;
   }
 
+  // Se o rate limit estiver ativo, não tenta entrar e não envia relatórios parciais
+  if (queueManager.isScheduledWaitActive()) {
+    console.log('⏳ Pausa por Rate Limit ativa. Agendamento em vigor.');
+    if (targetJid) {
+      const nextRunStr = formatDate(queueManager.getNextScheduledRun());
+      try {
+        await sock.sendMessage(targetJid, {
+          text: `⏳ *Limite do WhatsApp Ativo*\n\nO bot atingiu o limite de entradas temporário do WhatsApp. Os links estão guardados com segurança na fila.\n\n• Próxima tentativa agendada para: *${nextRunStr}*`
+        });
+      } catch (e) {}
+    }
+    return;
+  }
+
   let pendingLinks = [];
   let isUsingLocalFallback = false;
 
@@ -875,7 +889,7 @@ async function processHybridQueue(sock, targetJid) {
  * Função executada pelo Cron para verificar se há links pendentes
  */
 async function checkScheduledHybridQueue(sock) {
-  if (isProcessing) return;
+  if (isProcessing || !rdbModeEnabled) return;
   let pendingCount = 0;
   try {
     pendingCount = await getPendingCount();
