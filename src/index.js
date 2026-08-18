@@ -454,33 +454,14 @@ async function startBot() {
               try { await updateLinkStatus(item.code, 'success', result.groupName, 'Auto-captura'); } catch(e) {}
               queueManager.markProcessed(item.code, 'success', 'Auto-captura', result.groupName);
 
-              // Reage com ✅ para confirmar ao remetente
-              try {
-                await sock.sendMessage(fromJid, {
-                  react: { text: '✅', key: msg.key }
-                });
-              } catch(e) {}
-
             } else if (result.isRateLimited) {
               console.log(`   ⏳ Rate limit ao entrar: ${item.url}. Colocado na fila.`);
               try { await updateLinkStatus(item.code, 'rate_limited', '', result.reason); } catch(e) {}
-              // Reage com ⏳
-              try {
-                await sock.sendMessage(fromJid, {
-                  react: { text: '⏳', key: msg.key }
-                });
-              } catch(e) {}
+
             } else {
               console.log(`   ❌ Falha ao entrar: ${result.reason}`);
               try { await updateLinkStatus(item.code, 'failed', '', result.reason); } catch(e) {}
               queueManager.markProcessed(item.code, 'failed', result.reason, '');
-
-              // Reage com ❌ para links inválidos/expirados
-              try {
-                await sock.sendMessage(fromJid, {
-                  react: { text: '❌', key: msg.key }
-                });
-              } catch(e) {}
             }
 
             // Pequeno delay entre links se vieram vários juntos
