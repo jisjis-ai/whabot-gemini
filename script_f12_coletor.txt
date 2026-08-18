@@ -401,10 +401,10 @@
     };
     
     const CONFIG = {
-        scroll: 3,
-        verificacao: 4000,
+        scroll: 8,              // Scroll mais rápido
+        verificacao: 1500,      // Verifica links a cada 1.5s (era 4s)
         linksPorArquivo: 1000,
-        tempoSemLinks: 120000, // 2 minutos
+        tempoSemLinks: 25000,   // Avança em 25s sem links (era 120s)
         autoDownload: false,
         apiEndpoint: 'https://whabot-gemini-48ty.onrender.com/api/links'
     };
@@ -511,30 +511,18 @@
         return null;
     }
     
-    // ═══ DIGITAR REAL ═══
+    // ═══ DIGITAR INSTANTÂNEO (sem simulação letra por letra) ═══
     function digitarTexto(elemento, texto, callback) {
         elemento.focus();
         
+        // Cola o texto de uma vez (muito mais rápido que letra por letra)
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(elemento, '');
+        nativeInputValueSetter.call(elemento, texto);
         elemento.dispatchEvent(new Event('input', { bubbles: true }));
+        elemento.dispatchEvent(new Event('change', { bubbles: true }));
         
-        let i = 0;
-        
-        function digitarLetra() {
-            if (i < texto.length) {
-                const textoAtual = texto.substring(0, i + 1);
-                nativeInputValueSetter.call(elemento, textoAtual);
-                elemento.dispatchEvent(new Event('input', { bubbles: true }));
-                i++;
-                setTimeout(digitarLetra, 50 + Math.random() * 100);
-            } else {
-                elemento.dispatchEvent(new Event('change', { bubbles: true }));
-                callback();
-            }
-        }
-        
-        setTimeout(digitarLetra, 100);
+        // Callback imediato após 150ms
+        setTimeout(callback, 150);
     }
     
     // ═══ CLICAR DE VERDADE NO CAMPO ═══
@@ -665,19 +653,16 @@
         campo.value = '';
         
         clicarCampo(campo, function() {
-            console.log('⌨️ Digitando...');
             digitarTexto(campo, termo, function() {
-                console.log('✅ Texto completo digitado!');
-                
                 setTimeout(function() {
                     darEnter(campo);
-                    
+                    // Inicia coleta 1.2s após Enter (era 3s)
                     setTimeout(function() {
                         estadoAtual = 'COLETANDO';
                         stats.pesquisas++;
-                        console.log('📥 Iniciando coleta de links...');
-                    }, 3000);
-                }, 800);
+                        console.log('📥 Coletando links...');
+                    }, 1200);
+                }, 200);
             });
         });
     }
