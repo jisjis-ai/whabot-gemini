@@ -405,9 +405,9 @@
     const CONFIG = {
         scroll: 8,
         verificacao: 1500,
-        linksPorArquivo: 100,       // Auto-download a cada 100 links
+        linksPorArquivo: 20,        // Baixa a cada 20 links (nunca perde muito)
         tempoSemLinks: 25000,
-        autoDownload: true,         // LIGADO - baixa a cada 100 links
+        autoDownload: true,
         apiEndpoint: 'https://whabot-gemini-48ty.onrender.com/api/links'
     };
     
@@ -879,10 +879,21 @@
     }
     
     setInterval(ciclo, CONFIG.verificacao);
-    setInterval(salvarProgresso, 15000);
-    window.addEventListener('beforeunload', salvarProgresso);
-    window.addEventListener('pagehide', salvarProgresso);
-    
+    // Salva a cada 5 segundos (mais agressivo)
+    setInterval(salvarProgresso, 5000);
+    // Intercepta navegação SPA do Facebook (pushState) para salvar antes de sair
+    (function() {
+        const origPush = history.pushState.bind(history);
+        const origReplace = history.replaceState.bind(history);
+        history.pushState = function() { salvarProgresso(); return origPush.apply(this, arguments); };
+        history.replaceState = function() { salvarProgresso(); return origReplace.apply(this, arguments); };
+        window.addEventListener('beforeunload', salvarProgresso);
+        window.addEventListener('pagehide', salvarProgresso);
+        window.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'hidden') salvarProgresso();
+        });
+    })();
+
     // ═══ COMANDOS FIXOS (CONSOLE) ═══
     window.PARAR = function() { ativo = false; salvarProgresso(); console.log('🛑 PARADO (progresso salvo)'); };
     window.BAIXAR = function() { salvar(true); };
