@@ -4,13 +4,15 @@
 
 (function() {
     let ativo = true;
-    let linksColetados = new Set();
+    let linksColetados = new Set(); // Todos os links únicos encontrados
     let linksSalvos = 0;
     let contadorArquivos = 0;
     let pesquisaAtual = 0;
     let estadoAtual = 'INICIANDO';
     let ultimoLinkEncontrado = Date.now();
-    
+    let postsVistos = new Set();     // IDs de publicações do Facebook já processadas
+    let linksNovosDesdeUltimoEnvio = [];
+
     // ═══ TERMOS DE PESQUISA (300+) ═══
     const TERMOS = [
         'grupos whatsapp moçambique 2026',
@@ -401,53 +403,95 @@
     };
     
     const CONFIG = {
-        scroll: 8,              // Scroll mais rápido
-        verificacao: 1500,      // Verifica links a cada 1.5s (era 4s)
-        linksPorArquivo: 1000,
-        tempoSemLinks: 25000,   // Avança em 25s sem links (era 120s)
-        autoDownload: false,
+        scroll: 8,
+        verificacao: 1500,
+        linksPorArquivo: 100,       // Auto-download a cada 100 links
+        tempoSemLinks: 25000,
+        autoDownload: true,         // LIGADO - baixa a cada 100 links
         apiEndpoint: 'https://whabot-gemini-48ty.onrender.com/api/links'
     };
     
     const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';
     
-    // ═══ ENVIAR PARA A API USANDO IMAGE PING (BURLA ABSOLUTAMENTE QUALQUER BLOQUEIO DE CSP DO FACEBOOK) ═══
+    // ═══ ENVIAR PARA A API (3 MÉTODOS, DO MAIS FIÁVEL AO MENOS) ═══
     function enviarParaApiWhabot(linksArray) {
         if (!linksArray || linksArray.length === 0) return;
-        
+
+        // Salva no localStorage IMEDIATAMENTE (nunca perde, mesmo com recarga)
         try {
-            // Se estiver usando Tampermonkey
-            if (typeof GM_xmlhttpRequest === 'function') {
-                GM_xmlhttpRequest({
-                    method: 'POST',
-                    url: CONFIG.apiEndpoint,
-                    headers: { 'Content-Type': 'application/json' },
-                    data: JSON.stringify({ links: linksArray }),
-                    onload: function(res) {
-                        console.log('🚀 [WHABOT GM_XHR] Links enviados!', res.responseText);
-                    }
-                });
+            const chaveBuffer = 'whabot_buffer_envio';
+            const buffer = JSON.parse(localStorage.getItem(chaveBuffer) || '[]');
+            linksArray.forEach(function(l) { if (!buffer.includes(l)) buffer.push(l); });
+            localStorage.setItem(chaveBuffer, JSON.stringify(buffer));
+        } catch(e) {}
+
+        // MÉTODO 1: GM_xmlhttpRequest (Tampermonkey - mais fiável)
+        if (typeof GM_xmlhttpRequest === 'function') {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: CONFIG.apiEndpoint,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify({ links: linksArray }),
+                onload: function(res) {
+                    limparBuffer(linksArray);
+                    console.log('🚀 [GM_XHR] ' + linksArray.length + ' links enviados!');
+                }
+            });
+            return;
+        }
+
+        // MÉTODO 2: navigator.sendBeacon (não bloqueado por CSP connect-src)
+        try {
+            const blob = new Blob([JSON.stringify({ links: linksArray })], { type: 'application/json' });
+            const ok = navigator.sendBeacon(CONFIG.apiEndpoint, blob);
+            if (ok) {
+                limparBuffer(linksArray);
+                console.log('🚀 [BEACON] ' + linksArray.length + ' links enviados!');
                 return;
             }
-            
-            // Técnica Infalível: Image Ping (O navegador NUNCA bloqueia carregamento de img src por CSP connect-src)
+        } catch(e) {}
+
+        // MÉTODO 3: Image Ping por URL (fallback - GET em vez de POST)
+        try {
             linksArray.forEach(function(link) {
                 const img = new Image();
-                const pingUrl = CONFIG.apiEndpoint + '?add=' + encodeURIComponent(link) + '&t=' + Date.now();
-                img.src = pingUrl;
+                img.src = CONFIG.apiEndpoint + '?add=' + encodeURIComponent(link) + '&t=' + Date.now();
             });
-            
-            console.log('🚀 [WHABOT IMAGE PING] ' + linksArray.length + ' links enviados com sucesso via Image Ping (Bypassed Facebook CSP connect-src restriction)!');
+            limparBuffer(linksArray);
+            console.log('🚀 [IMAGE PING] ' + linksArray.length + ' links enviados!');
         } catch(e) {
-            console.log('⚠️ Error sending to API:', e.message);
+            console.log('⚠️ Todos os métodos de envio falharam. Links guardados no localStorage.');
         }
     }
-    
+
+    // Remove links do buffer local após confirmação de envio
+    function limparBuffer(linksEnviados) {
+        try {
+            const chaveBuffer = 'whabot_buffer_envio';
+            let buffer = JSON.parse(localStorage.getItem(chaveBuffer) || '[]');
+            const enviados = new Set(linksEnviados);
+            buffer = buffer.filter(function(l) { return !enviados.has(l); });
+            localStorage.setItem(chaveBuffer, JSON.stringify(buffer));
+        } catch(e) {}
+    }
+
+    // Re-tenta enviar links que ficaram no buffer (ex: após recarga de página)
+    function reenviarBuffer() {
+        try {
+            const buffer = JSON.parse(localStorage.getItem('whabot_buffer_envio') || '[]');
+            if (buffer.length > 0) {
+                console.log('🔄 Reenviando ' + buffer.length + ' links do buffer...');
+                enviarParaApiWhabot(buffer);
+            }
+        } catch(e) {}
+    }
+
     // ═══ SALVAR PROGRESSO NO LOCALSTORAGE ═══
     function salvarProgresso() {
         try {
             const dados = {
                 links: Array.from(linksColetados),
+                postsVistos: Array.from(postsVistos),
                 linksSalvos: linksSalvos,
                 contadorArquivos: contadorArquivos,
                 pesquisaAtual: pesquisaAtual
@@ -469,14 +513,20 @@
             if (dados.links && dados.links.length > 0) {
                 linksColetados = new Set(dados.links);
             }
+            if (dados.postsVistos && dados.postsVistos.length > 0) {
+                postsVistos = new Set(dados.postsVistos);
+            }
             linksSalvos = dados.linksSalvos || 0;
             contadorArquivos = dados.contadorArquivos || 0;
             pesquisaAtual = dados.pesquisaAtual || 0;
             
-            console.log('📂 PROGRESSO ANTERIOR ENCONTRADO!');
+            console.log('📂 PROGRESSO ANTERIOR RECUPERADO!');
             console.log('   Links já coletados: ' + linksColetados.size);
+            console.log('   Posts já vistos: ' + postsVistos.size + ' (não serão repetidos)');
             console.log('   Pesquisa: ' + (pesquisaAtual + 1) + '/' + TERMOS.length);
-            console.log('   Continuando de onde parou...');
+            
+            // Reenviar links que ficaram no buffer por falha anterior
+            reenviarBuffer();
             
             return true;
         } catch(e) {
@@ -484,7 +534,7 @@
             return false;
         }
     }
-    
+
     // ═══ BUSCAR CAMPO ═══
     function getCampo() {
         const seletores = [
@@ -690,34 +740,46 @@
         return cliques;
     }
     
-    // ═══ EXTRAIR LINKS ═══
+    // ═══ EXTRAIR LINKS (com deduplicação de posts já vistos) ═══
     function extrair() {
         expandirVerMais();
         const novos = [];
-        
+
+        // Pega TODOS os posts visíveis e verifica o data-id para evitar repetição
+        document.querySelectorAll('[data-pagelet], [data-testid], [role="article"]').forEach(function(post) {
+            // Gera um ID único para o post baseado em atributos do DOM
+            const postId = post.getAttribute('data-pagelet') ||
+                           post.getAttribute('data-testid') ||
+                           post.getAttribute('aria-posinset') ||
+                           post.innerHTML.substring(0, 80); // Fallback: primeiros 80 chars do HTML
+
+            if (postId && postsVistos.has(postId)) return; // Já processou este post
+            if (postId) postsVistos.add(postId);
+
+            // Extrai links dentro do post
+            post.querySelectorAll('a[href*="chat.whatsapp.com"]').forEach(function(a) {
+                processar(a.href, novos);
+            });
+            const textoPost = post.innerHTML || '';
+            const m = textoPost.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/gi);
+            if (m) m.forEach(function(match) { processar(match, novos); });
+        });
+
+        // Fallback: varrer toda a página para links soltos
         document.querySelectorAll('a[href*="chat.whatsapp.com"]').forEach(function(a) {
             processar(a.href, novos);
         });
-        
-        const html = document.body.innerHTML;
-        const matches = html.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/gi);
-        if (matches) {
-            matches.forEach(function(m) {
-                processar(m, novos);
-            });
-        }
-        
+
         if (novos.length > 0) {
             ultimoLinkEncontrado = Date.now();
-            console.log('✨ +' + novos.length + ' links novos! Total: ' + linksColetados.size);
+            console.log('✨ +' + novos.length + ' novos! Total: ' + linksColetados.size);
             salvarProgresso();
-            // Envia os novos links via Image Ping (Bypassing Facebook CSP connect-src restriction)
             enviarParaApiWhabot(novos);
         }
-        
+
         return novos;
     }
-    
+
     function processar(txt, arr) {
         const m = txt.match(/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,}/i);
         if (!m) return;
