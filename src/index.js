@@ -497,6 +497,10 @@ async function startBot() {
 • \`!entrar db\` : Processa todos os grupos pendentes no Banco/Fila.
 • \`!entrar rdb\` : Alterna o modo **Tempo Real (RDB)**. Cada link inserido via API REST entra imediatamente!
 
+📢 *Disparo & Menção Invisível:*
+• \`!divulgar <mensagem>\` : Dispara a mensagem para todos os grupos com **chat aberto**, com **menção invisível** (notificação para todos os membros!).
+• \`!tagall <mensagem>\` ou \`!marcar <mensagem>\` : Envia mensagem no grupo marcando TODOS os membros com **menção invisível**.
+
 📊 *Estatísticas no Banco de Dados:*
 • \`!status\` / \`!stats\` : Exibe resumo dos grupos.
   - Pendentes: *${stats.pending}*
@@ -606,6 +610,103 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
           } else {
             await sock.sendMessage(fromJid, {
               text: `⏹️ *Modo Real-Time DB (RDB) DESATIVADO.*\nO bot não processará novos links da API automaticamente.`
+            });
+          }
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 3.1 COMANDO: !tagall / !mencionar / !marcar <mensagem> (Menção Invisível no Grupo)
+        // ---------------------------------------------------------
+        if (lowerText.startsWith('!tagall') || lowerText.startsWith('!mencionar') || lowerText.startsWith('!marcar')) {
+          const msgTexto = trimmedText.replace(/^!(tagall|mencionar|marcar)\s*/i, '').trim();
+          if (!msgTexto) {
+            await sock.sendMessage(fromJid, {
+              text: `⚠️ *Uso do Comando:*\n\n\`!tagall Minha mensagem aqui\`\nEnvia uma mensagem no grupo marcando todos os membros com **menção invisível** (notificação para todos os membros!).`
+            });
+            continue;
+          }
+
+          if (!fromJid.endsWith('@g.us')) {
+            await sock.sendMessage(fromJid, {
+              text: `⚠️ Este comando deve ser enviado dentro de um grupo do WhatsApp.`
+            });
+            continue;
+          }
+
+          try {
+            const groupMetadata = await sock.groupMetadata(fromJid);
+            const participants = groupMetadata.participants.map(p => p.id);
+            await sock.sendMessage(fromJid, {
+              text: msgTexto,
+              mentions: participants
+            });
+            console.log(`📢 [TagAll] Mensagem enviada com menção invisível para ${participants.length} membros no grupo.`);
+          } catch (err) {
+            await sock.sendMessage(fromJid, {
+              text: `❌ Falha ao obter membros do grupo: ${err.message}`
+            });
+          }
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 3.2 COMANDO: !divulgar / !broadcast <mensagem> (Disparo em Grupos Abertos com Menção Invisível)
+        // ---------------------------------------------------------
+        if (lowerText.startsWith('!divulgar') || lowerText.startsWith('!broadcast')) {
+          const msgTexto = trimmedText.replace(/^!(divulgar|broadcast)\s*/i, '').trim();
+          if (!msgTexto) {
+            await sock.sendMessage(fromJid, {
+              text: `⚠️ *Uso do Comando:*\n\n\`!divulgar Minha mensagem de divulgação\`\nDispara a mensagem para **todos os grupos com chat aberto**, usando **menção invisível** em todos os membros!`
+            });
+            continue;
+          }
+
+          await sock.sendMessage(fromJid, {
+            text: `📢 *Iniciando Disparo de Divulgação...*\n\nBuscando grupos com chat aberto...`
+          });
+
+          try {
+            const groupsDict = await sock.groupFetchAllParticipating();
+            const allGroups = Object.values(groupsDict);
+            // Filtra grupos onde o chat é aberto para membros (!announce)
+            const openGroups = allGroups.filter(g => !g.announce);
+
+            if (openGroups.length === 0) {
+              await sock.sendMessage(fromJid, {
+                text: `⚠️ Nenhum grupo com chat aberto encontrado (${allGroups.length} grupos verificados).`
+              });
+              continue;
+            }
+
+            await sock.sendMessage(fromJid, {
+              text: `🚀 *Disparando mensagem para ${openGroups.length} grupos abertos...*\n(Com menção invisível para notificar todos os membros. Aguarde um intervalo seguro de 3s entre envios).`
+            });
+
+            let sucessos = 0;
+            let falhas = 0;
+
+            for (const group of openGroups) {
+              try {
+                const participants = group.participants ? group.participants.map(p => p.id) : [];
+                await sock.sendMessage(group.id, {
+                  text: msgTexto,
+                  mentions: participants
+                });
+                sucessos++;
+              } catch (e) {
+                falhas++;
+              }
+              // Delay seguro de 3 segundos entre envios de grupos
+              await new Promise(r => setTimeout(r, 3000));
+            }
+
+            await sock.sendMessage(fromJid, {
+              text: `✅ *Divulgação Concluída com Sucesso!*\n\n• Enviados com sucesso: *${sucessos}*\n• Falhas/Bloqueados: *${falhas}*\n• Total de Grupos Abertos: *${openGroups.length}*`
+            });
+          } catch (err) {
+            await sock.sendMessage(fromJid, {
+              text: `❌ Erro ao buscar lista de grupos: ${err.message}`
             });
           }
           continue;
