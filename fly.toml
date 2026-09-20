@@ -1,0 +1,28 @@
+# fly.toml app configuration file for Whabot
+app = 'whabot-mz'
+primary_region = 'jnb'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '3000'
+  DATA_DIR = '/var/data'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[[mounts]]
+  source = 'whabot_data'
+  destination = '/var/data'
+  initial_size = '1gb'

@@ -204,24 +204,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint REST API: DELETE /api/links (Limpar banco e fila via API)
-  if (pathname === '/api/links' && method === 'DELETE') {
-    let count = 0;
-    try {
-      count = await deleteAllLinks();
-    } catch (e) {}
-    queueManager.data.pending = [];
-    queueManager.saveQueue();
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, deletedCount: count }));
-    return;
-  }
-
-  // Página Principal Web: QR Code e Status Painel
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-
-  if (isConnected) {
+  // Endpoint REST API: GET /api/status (Status ao vivo para a dashboard)
+  if (pathname === '/api/status' && method === 'GET') {
     let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
     try {
       stats = await getStats();
@@ -230,91 +214,397 @@ const server = http.createServer(async (req, res) => {
       stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
     }
 
-    res.end(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Whabot Painel</title>
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <style>
-            body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
-            .card { background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 480px; width: 100%; text-align: center; }
-            .badge { background: #22c55e; color: #fff; padding: 6px 14px; border-radius: 20px; font-weight: bold; display: inline-block; margin-bottom: 1rem; }
-            .rdb-badge { background: ${rdbModeEnabled ? '#3b82f6' : '#64748b'}; color: #fff; padding: 4px 10px; border-radius: 12px; font-size: 0.85rem; margin-left: 6px; }
-            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 1.5rem; text-align: left; }
-            .box { background: #0f172a; padding: 12px; border-radius: 8px; font-size: 0.9rem; }
-            .box span { display: block; font-size: 1.3rem; font-weight: bold; color: #38bdf8; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <div class="badge">✅ WhatsApp Conectado</div>
-            <span class="rdb-badge">${rdbModeEnabled ? '⚡ RDB Ativo' : '⏹️ RDB Inativo'}</span>
-            <h2>Whabot Group Joiner</h2>
-            <p>Bot operando via Híbrido (PostgreSQL + Fallback Fila Local) (${config.minDelaySeconds}-${config.maxDelaySeconds}s delay).</p>
-            
-            <div class="grid">
-              <div class="box">Pendentes: <span>${stats.pending}</span></div>
-              <div class="box">Sucessos: <span>${stats.success}</span></div>
-              <div class="box">Falhas: <span>${stats.failed}</span></div>
-              <div class="box">Total Geral: <span>${stats.total}</span></div>
-            </div>
-          </div>
-        </body>
-      </html>
-    `);
+    let qrDataUrl = null;
+    if (latestQR && !isConnected) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(latestQR);
+      } catch (e) {}
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        success: true,
+        isConnected,
+        rdbModeEnabled,
+        isProcessing,
+        isScheduledWaitActive: queueManager.isScheduledWaitActive(),
+        nextScheduledRun: queueManager.getNextScheduledRun(),
+        latestQR: qrDataUrl,
+        stats
+      })
+    );
     return;
   }
 
-  if (latestQR) {
+  // Endpoint REST API: POST /api/trigger (Ações da Dashboard: processar, alternar RDB)
+  if (pathname === '/api/trigger' && method === 'POST') {
+    let bodyText = '';
+    req.on('data', chunk => { bodyText += chunk.toString(); });
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(bodyText || '{}');
+        if (body.action === 'toggleRdb') {
+          rdbModeEnabled = !rdbModeEnabled;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, rdbModeEnabled }));
+          return;
+        }
+        if (body.action === 'process') {
+          if (globalSock) {
+            processHybridQueue(globalSock, rdbTargetJid || 'web@system');
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Processamento iniciado' }));
+          return;
+        }
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Ação inválida' }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Página Principal Web: DASHBOARD COMPLETA INTERATIVA
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+
+  let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+  try {
+    stats = await getStats();
+  } catch (e) {
+    const pending = queueManager.getPendingItems().length;
+    stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
+  }
+
+  let initialQrUrl = '';
+  if (latestQR && !isConnected) {
     try {
-      const qrImageDataUrl = await QRCode.toDataURL(latestQR);
-      res.end(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Whabot - Escanear QR Code</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <meta http-equiv="refresh" content="6">
-            <style>
-              body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-              .card { background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 420px; }
-              img { border-radius: 8px; margin: 1rem 0; width: 260px; height: 260px; }
-            </style>
-          </head>
-          <body>
-            <div class="card">
-              <h2>📲 Escaneie o QR Code</h2>
-              <p>Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>
-              <img src="${qrImageDataUrl}" alt="QR Code WhatsApp" />
-              <p style="font-size: 0.85rem; color: #94a3b8;">A página atualiza automaticamente a cada 6 segundos.</p>
-            </div>
-          </body>
-        </html>
-      `);
-      return;
-    } catch (err) {
-      console.error('Erro ao gerar QR em DataURL:', err);
-    }
+      initialQrUrl = await QRCode.toDataURL(latestQR);
+    } catch (e) {}
   }
 
   res.end(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Whabot - Inicializando...</title>
-        <meta http-equiv="refresh" content="3">
-        <style>
-          body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-        </style>
-      </head>
-      <body>
-        <div>
-          <h2>⏳ Inicializando Conexão...</h2>
-          <p>Aguarde enquanto o QR Code é gerado.</p>
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <title>Whabot Painel Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card: #121929;
+      --card-border: #1e293b;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.15);
+      --green: #10b981;
+      --red: #f43f5e;
+      --yellow: #f59e0b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 1.5rem; min-height: 100vh; }
+    .container { max-width: 1100px; margin: 0 auto; }
+    
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
+    .logo { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    
+    .status-badges { display: flex; gap: 0.75rem; align-items: center; }
+    .badge { padding: 6px 14px; border-radius: 9999px; font-size: 0.85rem; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+    .badge-success { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-warning { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-info { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .stat-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; }
+    .stat-lbl { font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-val { font-size: 2rem; font-weight: 800; margin-top: 0.5rem; }
+
+    .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+    @media (max-width: 850px) { .main-grid { grid-template-columns: 1fr; } }
+    
+    .panel-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; }
+    .panel-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; }
+    
+    .qr-container { text-align: center; padding: 1rem; background: #0b1120; border-radius: 12px; border: 1px dashed var(--card-border); min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    .qr-container img { width: 220px; height: 220px; border-radius: 12px; }
+
+    textarea { width: 100%; height: 120px; background: #0b1120; border: 1px solid var(--card-border); border-radius: 10px; color: var(--text); padding: 0.8rem; font-size: 0.9rem; resize: vertical; outline: none; margin-bottom: 1rem; }
+    textarea:focus { border-color: var(--accent); }
+
+    .btn-group { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    button { background: var(--accent); color: #000; border: none; padding: 10px 18px; border-radius: 10px; font-weight: 700; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+    button:hover { opacity: 0.9; transform: translateY(-1px); }
+    button.btn-sec { background: #1e293b; color: var(--text); border: 1px solid var(--card-border); }
+    button.btn-sec:hover { background: #334155; }
+    button.btn-danger { background: rgba(244, 63, 94, 0.2); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.4); }
+    button.btn-danger:hover { background: #f43f5e; color: #fff; }
+
+    .table-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
+    th { padding: 10px 14px; background: #0b1120; color: var(--text-muted); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; border-bottom: 1px solid var(--card-border); }
+    td { padding: 12px 14px; border-bottom: 1px solid var(--card-border); word-break: break-all; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .status-tag { padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; }
+    .tag-pending { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .tag-success { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .tag-failed { background: rgba(244, 63, 94, 0.2); color: #fda4af; }
+    
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #1e293b; color: #fff; padding: 12px 20px; border-radius: 10px; border: 1px solid var(--accent); box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none; z-index: 99; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div>
+        <div class="logo">⚡ WHABOT DASHBOARD</div>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">Gerenciador de Grupos do WhatsApp & API REST (Fly.io)</p>
+      </div>
+
+      <div class="status-badges">
+        <div id="conn-badge" class="badge ${isConnected ? 'badge-success' : 'badge-warning'}">
+          ${isConnected ? '🟢 Conectado' : '🟡 Desconectado'}
         </div>
-      </body>
-    </html>
+        <div id="rdb-badge" class="badge ${rdbModeEnabled ? 'badge-info' : 'badge-warning'}">
+          ${rdbModeEnabled ? '⚡ Modo Real-Time (RDB) Ativo' : '⏹️ RDB Inativo'}
+        </div>
+      </div>
+    </header>
+
+    <!-- ESTÁTISTICAS -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-lbl">Pendentes</div>
+        <div class="stat-val" id="st-pending" style="color: #fbbf24;">${stats.pending}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-lbl">Sucessos</div>
+        <div class="stat-val" id="st-success" style="color: #34d399;">${stats.success}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-lbl">Falhas</div>
+        <div class="stat-val" id="st-failed" style="color: #fda4af;">${stats.failed}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-lbl">Total Geral</div>
+        <div class="stat-val" id="st-total" style="color: #38bdf8;">${stats.total}</div>
+      </div>
+    </div>
+
+    <!-- CARDS PRINCIPAIS -->
+    <div class="main-grid">
+      <!-- CONEXÃO / QR CODE -->
+      <div class="panel-card">
+        <div class="panel-title">📲 Conexão WhatsApp</div>
+        <div class="qr-container" id="qr-box">
+          ${
+            isConnected
+              ? '<div style="color: #34d399; font-size: 1.2rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Pronto para entrar em grupos via Web ou WhatsApp.</p>'
+              : initialQrUrl
+              ? `<img src="${initialQrUrl}" alt="QR Code WhatsApp" /><p style="color: var(--text-muted); font-size: 0.85rem;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>`
+              : '<p style="color: var(--text-muted);">⏳ Inicializando QR Code...</p>'
+          }
+        </div>
+      </div>
+
+      <!-- INSERIR LINKS & AÇÕES -->
+      <div class="panel-card">
+        <div class="panel-title">📥 Adicionar Links de Grupos</div>
+        <textarea id="links-input" placeholder="Cole aqui os links dos grupos (chat.whatsapp.com/...)"></textarea>
+        
+        <div class="btn-group" style="margin-bottom: 1rem;">
+          <button id="btn-add">➕ Adicionar Links</button>
+          <button id="btn-process" class="btn-sec">⚡ Processar Fila</button>
+          <button id="btn-toggle-rdb" class="btn-sec">🔄 Alternar RDB</button>
+        </div>
+
+        <div style="border-top: 1px solid var(--card-border); padding-top: 1rem; margin-top: 1rem;">
+          <button id="btn-clear" class="btn-danger">🗑️ Limpar Todos os Links</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABELA DE LINKS -->
+    <div class="table-card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div class="panel-title" style="margin-bottom: 0;">📋 Grupos Cadastrados no Banco / Fila</div>
+        <input id="search-table" type="text" placeholder="Filtrar grupos..." style="background: #0b1120; border: 1px solid var(--card-border); color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Nome do Grupo</th>
+            <th>URL / Link</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="table-body">
+          <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Carregando grupos...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 3000);
+    }
+
+    async function updateStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const d = await res.json();
+        if (d.success) {
+          // Badges
+          const connBadge = document.getElementById('conn-badge');
+          connBadge.className = 'badge ' + (d.isConnected ? 'badge-success' : 'badge-warning');
+          connBadge.innerHTML = d.isConnected ? '🟢 Conectado' : '🟡 Desconectado';
+
+          const rdbBadge = document.getElementById('rdb-badge');
+          rdbBadge.className = 'badge ' + (d.rdbModeEnabled ? 'badge-info' : 'badge-warning');
+          rdbBadge.innerHTML = d.rdbModeEnabled ? '⚡ Modo Real-Time (RDB) Ativo' : '⏹️ RDB Inativo';
+
+          // Stats
+          document.getElementById('st-pending').innerText = d.stats.pending;
+          document.getElementById('st-success').innerText = d.stats.success;
+          document.getElementById('st-failed').innerText = d.stats.failed;
+          document.getElementById('st-total').innerText = d.stats.total;
+
+          // QR Code Box
+          const qrBox = document.getElementById('qr-box');
+          if (d.isConnected) {
+            qrBox.innerHTML = '<div style="color: #34d399; font-size: 1.2rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Pronto para entrar em grupos via Web ou WhatsApp.</p>';
+          } else if (d.latestQR) {
+            qrBox.innerHTML = '<img src="' + d.latestQR + '" alt="QR Code WhatsApp" /><p style="color: var(--text-muted); font-size: 0.85rem;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>';
+          } else {
+            qrBox.innerHTML = '<p style="color: var(--text-muted);">⏳ Inicializando QR Code...</p>';
+          }
+        }
+      } catch (e) {}
+    }
+
+    async function loadTable() {
+      try {
+        const res = await fetch('/api/links');
+        const d = await res.json();
+        if (d.success && Array.isArray(d.data)) {
+          const tbody = document.getElementById('table-body');
+          const filter = document.getElementById('search-table').value.toLowerCase();
+          const items = d.data.filter(i => (i.url || '').toLowerCase().includes(filter) || (i.group_name || '').toLowerCase().includes(filter));
+          
+          if (items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Nenhum grupo encontrado</td></tr>';
+            return;
+          }
+
+          tbody.innerHTML = items.map((item, idx) => {
+            let tagClass = 'tag-pending';
+            if (item.status === 'success') tagClass = 'tag-success';
+            if (item.status === 'failed') tagClass = 'tag-failed';
+
+            return '<tr>' +
+              '<td>' + (idx + 1) + '</td>' +
+              '<td style="font-weight: 600;">' + (item.group_name || '—') + '</td>' +
+              '<td><a href="' + item.url + '" target="_blank" style="color: var(--accent); text-decoration: none;">' + item.url + '</a></td>' +
+              '<td><span class="status-tag ' + tagClass + '">' + (item.status || 'pending').toUpperCase() + '</span></td>' +
+            '</tr>';
+          }).join('');
+        }
+      } catch (e) {}
+    }
+
+    // Event Listeners
+    document.getElementById('btn-add').addEventListener('click', async () => {
+      const input = document.getElementById('links-input');
+      const text = input.value.trim();
+      if (!text) { showToast('Cole pelo menos um link!'); return; }
+
+      try {
+        const res = await fetch('/api/links', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast('✨ ' + d.addedCount + ' novos links adicionados!');
+          input.value = '';
+          updateStatus();
+          loadTable();
+        }
+      } catch (e) {
+        showToast('Erro ao enviar links!');
+      }
+    });
+
+    document.getElementById('btn-process').addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'process' })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast('⚡ Processamento da fila iniciado!');
+        }
+      } catch (e) {}
+    });
+
+    document.getElementById('btn-toggle-rdb').addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'toggleRdb' })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast('Modo RDB: ' + (d.rdbModeEnabled ? 'ATIVADO' : 'DESATIVADO'));
+          updateStatus();
+        }
+      } catch (e) {}
+    });
+
+    document.getElementById('btn-clear').addEventListener('click', async () => {
+      if (!confirm('Tem certeza que deseja apagar todos os grupos salvos?')) return;
+      try {
+        const res = await fetch('/api/links', { method: 'DELETE' });
+        const d = await res.json();
+        if (d.success) {
+          showToast('🗑️ Banco e fila limpos com sucesso!');
+          updateStatus();
+          loadTable();
+        }
+      } catch (e) {}
+    });
+
+    document.getElementById('search-table').addEventListener('input', loadTable);
+
+    // Initial load & Intervals
+    updateStatus();
+    loadTable();
+    setInterval(updateStatus, 3000);
+    setInterval(loadTable, 10000);
+  </script>
+</body>
+</html>
   `);
 });
 
