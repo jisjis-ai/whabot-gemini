@@ -258,6 +258,29 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ success: true, message: 'Processamento iniciado' }));
           return;
         }
+        if (body.action === 'resetSession') {
+          console.log('🔄 [API] Solicitado reset da sessão do WhatsApp...');
+          isConnected = false;
+          latestQR = null;
+          if (globalSock) {
+            try { globalSock.end(new Error('Reset manual de sessão')); } catch (e) {}
+          }
+          const baseDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
+          const authPath = process.env.AUTH_DIR
+            ? path.resolve(process.env.AUTH_DIR)
+            : path.resolve(baseDataDir, 'auth_info');
+          
+          try {
+            if (fs.existsSync(authPath)) {
+              fs.rmSync(authPath, { recursive: true, force: true });
+            }
+          } catch (e) {}
+
+          setTimeout(startBot, 2000);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Sessão resetada com sucesso! Gerando novo QR Code...' }));
+          return;
+        }
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Ação inválida' }));
       } catch (e) {
@@ -427,8 +450,9 @@ const server = http.createServer(async (req, res) => {
           <button id="btn-toggle-rdb" class="btn-sec">🔄 Alternar RDB</button>
         </div>
 
-        <div style="border-top: 1px solid var(--card-border); padding-top: 1rem; margin-top: 1rem;">
-          <button id="btn-clear" class="btn-danger">🗑️ Limpar Todos os Links</button>
+        <div style="border-top: 1px solid var(--card-border); padding-top: 1rem; margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
+          <button id="btn-reset-session" class="btn-danger">📲 Desconectar / Gerar Novo QR Code</button>
+          <button id="btn-clear" class="btn-danger" style="background: rgba(244, 63, 94, 0.1); border-color: rgba(244, 63, 94, 0.2);">🗑️ Limpar Todos os Links</button>
         </div>
       </div>
     </div>
@@ -582,6 +606,22 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {}
     });
 
+    document.getElementById('btn-reset-session').addEventListener('click', async () => {
+      if (!confirm('Deseja desconectar a sessão atual do WhatsApp e gerar um NOVO QR Code?')) return;
+      try {
+        const res = await fetch('/api/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'resetSession' })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast('📲 Sessão resetada! Gerando novo QR Code...');
+          updateStatus();
+        }
+      } catch (e) {}
+    });
+
     document.getElementById('btn-clear').addEventListener('click', async () => {
       if (!confirm('Tem certeza que deseja apagar todos os grupos salvos?')) return;
       try {
@@ -657,18 +697,29 @@ async function startBot() {
 
     if (connection === 'close') {
       isConnected = false;
-      const shouldReconnect =
-        (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      latestQR = null;
+      const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
       console.log(
         '⚠️ Conexão fechada. Motivo:',
         lastDisconnect?.error?.message || 'Desconhecido',
-        'Reconectando:',
-        shouldReconnect
+        `[StatusCode: ${statusCode}]`
       );
-      if (shouldReconnect) {
-        setTimeout(startBot, 5000);
+
+      if (isLoggedOut || statusCode === 401 || statusCode === 403) {
+        console.log('🗑️ Sessão encerrada/desconectada pelo WhatsApp. Limpando credenciais antigas para gerar novo QR Code...');
+        try {
+          if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
+          }
+        } catch (e) {
+          console.error('Erro ao limpar pasta auth_info:', e.message);
+        }
+        setTimeout(startBot, 2000);
       } else {
-        console.log('❌ Sessão encerrada. Exclua a pasta de autenticação e escaneie o QR Code novamente.');
+        console.log('🔄 Tentando reconectar bot em 4 segundos...');
+        setTimeout(startBot, 4000);
       }
     } else if (connection === 'open') {
       isConnected = true;
