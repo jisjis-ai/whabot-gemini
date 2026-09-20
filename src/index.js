@@ -1328,20 +1328,52 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         }
 
         // ---------------------------------------------------------
-        // 3.2 COMANDO: !divulgar / !broadcast <mensagem> (Disparo em Grupos Abertos com Menção Invisível)
+        // 3.2 COMANDO: !divulgar / !broadcast <mensagem | vídeo+legenda>
+        // Envia texto OU vídeo para todos os grupos com chat aberto + menção invisível
+        // Para vídeo: envie um vídeo no WhatsApp com caption "!divulgar" ou "!divulgar legenda"
         // ---------------------------------------------------------
         if (lowerText.startsWith('!divulgar') || lowerText.startsWith('!broadcast')) {
+          // --- Detectar se mensagem tem vídeo anexado ---
+          const videoMsg = msg.message.videoMessage;
+          const hasVideo = !!videoMsg;
+
+          // --- Extrair texto/legenda ---
           const msgTexto = trimmedText.replace(/^!(divulgar|broadcast)\s*/i, '').trim();
-          if (!msgTexto) {
+
+          // Sem conteúdo (nem vídeo nem texto)
+          if (!msgTexto && !hasVideo) {
             await sock.sendMessage(fromJid, {
-              text: `⚠️ *Uso do Comando:*\n\n\`!divulgar Minha mensagem de divulgação\`\nDispara a mensagem para **todos os grupos com chat aberto**, usando **menção invisível** em todos os membros!`
+              text: `⚠️ *Uso do Comando:*\n\n` +
+                    `📝 *Texto:* \`!divulgar Minha mensagem de divulgação\`\n` +
+                    `📹 *Vídeo:* Envie um vídeo com legenda \`!divulgar Legenda aqui\` (ou só \`!divulgar\`)\n\n` +
+                    `Dispara para **todos os grupos com chat aberto**, com **menção invisível**!`
             });
             continue;
           }
 
           await sock.sendMessage(fromJid, {
-            text: `📢 *Iniciando Disparo de Divulgação...*\n\nBuscando grupos com chat aberto...`
+            text: `📢 *Iniciando Disparo de Divulgação...*\n\n${hasVideo ? '📹 Modo: Vídeo com legenda' : '📝 Modo: Texto'}\nBuscando grupos com chat aberto...`
           });
+
+          // --- Baixar vídeo se existir ---
+          let videoBuffer = null;
+          if (hasVideo) {
+            try {
+              videoBuffer = await downloadMediaMessage(
+                msg,
+                'buffer',
+                {},
+                { logger: pino({ level: 'silent' }), reconnect: sock.type }
+              );
+              console.log(`📹 [Divulgar] Vídeo baixado: ${videoBuffer.length} bytes`);
+            } catch (dlErr) {
+              console.error('❌ Erro ao baixar vídeo para divulgação:', dlErr.message);
+              await sock.sendMessage(fromJid, {
+                text: `❌ Falha ao baixar o vídeo. Tente reenviar.`
+              });
+              continue;
+            }
+          }
 
           try {
             const groupsDict = await sock.groupFetchAllParticipating();
@@ -1357,7 +1389,7 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
             }
 
             await sock.sendMessage(fromJid, {
-              text: `🚀 *Disparando mensagem para ${openGroups.length} grupos abertos...*\n(Com menção invisível para notificar todos os membros. Aguarde um intervalo seguro de 3s entre envios).`
+              text: `🚀 *Disparando para ${openGroups.length} grupos abertos...*\n(Menção invisível ativa. Delay seguro de 3s entre grupos.)`
             });
 
             let sucessos = 0;
@@ -1366,20 +1398,37 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
             for (const group of openGroups) {
               try {
                 const participants = group.participants ? group.participants.map(p => p.id) : [];
-                await sock.sendMessage(group.id, {
-                  text: msgTexto,
-                  mentions: participants
-                });
+
+                if (videoBuffer) {
+                  // Envia vídeo + legenda + menção invisível
+                  await sock.sendMessage(group.id, {
+                    video: videoBuffer,
+                    caption: msgTexto || '',
+                    mentions: participants,
+                    mimetype: videoMsg.mimetype || 'video/mp4'
+                  });
+                } else {
+                  // Envia texto + menção invisível
+                  await sock.sendMessage(group.id, {
+                    text: msgTexto,
+                    mentions: participants
+                  });
+                }
                 sucessos++;
               } catch (e) {
                 falhas++;
+                console.error(`❌ [Divulgar] Falha no grupo ${group.id}: ${e.message}`);
               }
               // Delay seguro de 3 segundos entre envios de grupos
               await new Promise(r => setTimeout(r, 3000));
             }
 
             await sock.sendMessage(fromJid, {
-              text: `✅ *Divulgação Concluída com Sucesso!*\n\n• Enviados com sucesso: *${sucessos}*\n• Falhas/Bloqueados: *${falhas}*\n• Total de Grupos Abertos: *${openGroups.length}*`
+              text: `✅ *Divulgação Concluída!*\n\n` +
+                    `• ${hasVideo ? '📹 Vídeo' : '📝 Texto'} enviado\n` +
+                    `• ✅ Sucesso: *${sucessos}*\n` +
+                    `• ❌ Falhas: *${falhas}*\n` +
+                    `• 📊 Total grupos abertos: *${openGroups.length}*`
             });
           } catch (err) {
             await sock.sendMessage(fromJid, {
@@ -1388,6 +1437,7 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
           }
           continue;
         }
+
 
         // ---------------------------------------------------------
         // 3.3 COMANDO: !autoresp <modo> [mensagem] (Auto-Responder Inteligente)
