@@ -1,7 +1,7 @@
 {
   "prefix": "!entrar",
-  "minDelaySeconds": 2,
-  "maxDelaySeconds": 5,
+  "minDelaySeconds": 10,
+  "maxDelaySeconds": 20,
   "batchLimit": 0,
   "rescheduleHours": 2,
   "adminJids": [],

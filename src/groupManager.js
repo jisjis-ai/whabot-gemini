@@ -7,21 +7,23 @@
 export async function joinGroup(sock, code) {
   let groupName = '';
 
-  // Tenta primeiramente obter as informações do convite para pegar o nome do grupo
-  try {
-    const inviteInfo = await sock.groupGetInviteInfo(code);
-    if (inviteInfo && inviteInfo.subject) {
-      groupName = inviteInfo.subject;
-    }
-  } catch (err) {
-    // Se falhar ao pegar info, não impede a tentativa de aceitar o convite
-  }
-
   try {
     const responseJid = await sock.groupAcceptInvite(code);
+    let jid = responseJid || '';
+
+    // Se tiver o JID do grupo recém-entrado, busca o nome do grupo via metadata
+    if (jid) {
+      try {
+        const metadata = await sock.groupMetadata(jid);
+        if (metadata && metadata.subject) {
+          groupName = metadata.subject;
+        }
+      } catch (e) {}
+    }
+
     return {
       success: true,
-      groupJid: responseJid || '',
+      groupJid: jid,
       groupName: groupName || 'Grupo de WhatsApp',
       reason: ''
     };
@@ -33,21 +35,20 @@ export async function joinGroup(sock, code) {
     let isRateLimited = false;
 
     if (statusCode === 401 || statusCode === 404 || errorStr.includes('not-authorized') || errorStr.includes('invalid')) {
-      reason = 'Convite inválido ou revogado';
+      reason = 'Convite inválido, expirado ou revogado';
     } else if (statusCode === 409 || errorStr.includes('conflict') || errorStr.includes('already')) {
-      reason = 'Você já é participante deste grupo';
       return {
         success: true, // Considera sucesso pois o objetivo de estar no grupo foi atingido
-        groupName: groupName || 'Grupo (Já participante)',
+        groupName: 'Grupo (Já participante)',
         reason: 'Já era participante do grupo'
       };
     } else if (statusCode === 403 || errorStr.includes('forbidden')) {
-      reason = 'Entrada proibida ou restrita pelos administradores';
+      reason = 'Entrada restrita por administradores';
     } else if (statusCode === 429 || statusCode === 463 || errorStr.includes('rate') || errorStr.includes('overload') || errorStr.includes('too many')) {
       reason = 'Limite de solicitações do WhatsApp atingido (Rate Limit)';
       isRateLimited = true;
     } else if (errorStr.includes('full') || errorStr.includes('cap')) {
-      reason = 'O grupo atingiu a capacidade máxima de membros';
+      reason = 'Grupo lotado (capacidade máxima atingida)';
     } else {
       reason = `Erro (${statusCode || 'desconhecido'}): ${error?.message || errorStr}`;
     }

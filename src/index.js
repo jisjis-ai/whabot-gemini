@@ -50,6 +50,7 @@ if (fs.existsSync(CONFIG_PATH)) {
 
 const queueManager = new QueueManager();
 let isProcessing = false;
+let abortProcessing = false;
 let latestQR = null;
 let isConnected = false;
 let globalSock = null;
@@ -285,6 +286,9 @@ const server = http.createServer(async (req, res) => {
 
   // Endpoint REST API: DELETE /api/links (Limpar todos os links do banco de dados e da fila local)
   if (pathname === '/api/links' && method === 'DELETE') {
+    abortProcessing = true;
+    isProcessing = false;
+    queueManager.clearSchedule();
     let deletedCount = 0;
     try {
       deletedCount = await deleteAllLinks();
@@ -452,6 +456,15 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ success: true, message: 'Processamento iniciado' }));
           return;
         }
+        if (body.action === 'stop') {
+          abortProcessing = true;
+          isProcessing = false;
+          queueManager.clearSchedule();
+          console.log('🛑 [API] Solicitada interrupção do processamento...');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Processamento interrompido' }));
+          return;
+        }
         if (body.action === 'resetSession') {
           console.log('🔄 [API] Solicitado reset da sessão do WhatsApp...');
           isConnected = false;
@@ -496,192 +509,221 @@ const server = http.createServer(async (req, res) => {
     stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
   }
 
-  let initialQrUrl = '';
-  if (latestQR && !isConnected) {
-    try {
-      initialQrUrl = await QRCode.toDataURL(latestQR);
-    } catch (e) {}
-  }
-
-  res.end(`
+   res.end(`
 <!DOCTYPE html>
 <html lang="pt">
 <head>
   <meta charset="UTF-8">
-  <title>Whabot Painel Dashboard</title>
+  <title>WhatsApp Whabot MZ Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #090d16;
-      --card: #121929;
-      --card-border: #1e293b;
-      --accent: #06b6d4;
-      --accent-glow: rgba(6, 182, 212, 0.15);
-      --green: #10b981;
-      --red: #f43f5e;
-      --yellow: #f59e0b;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
+      --wa-bg: #111b21;
+      --wa-panel: #202c33;
+      --wa-panel-header: #182229;
+      --wa-border: #2a3942;
+      --wa-green: #00a884;
+      --wa-green-hover: #06cf9c;
+      --wa-header-bg: #008069;
+      --wa-text: #e9edef;
+      --wa-text-muted: #8696a0;
+      --wa-card-inner: #111b21;
+      --wa-red: #ea0038;
+      --wa-red-hover: #f87171;
+      --wa-yellow: #ffbc11;
+      --wa-blue: #53bdeb;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 1.5rem; min-height: 100vh; }
-    .container { max-width: 1100px; margin: 0 auto; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; }
+    body { background: var(--wa-bg); color: var(--wa-text); min-height: 100vh; padding-bottom: 2rem; }
     
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
-    .logo { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    /* WHATSAPP APP BAR HEADER */
+    .top-bar { background: var(--wa-header-bg); padding: 1rem 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+    .brand-title { display: flex; align-items: center; gap: 10px; font-size: 1.35rem; font-weight: 800; color: #fff; letter-spacing: -0.3px; }
+    .brand-icon { width: 34px; height: 34px; background: #fff; color: var(--wa-header-bg); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 900; }
     
-    .status-badges { display: flex; gap: 0.75rem; align-items: center; }
-    .badge { padding: 6px 14px; border-radius: 9999px; font-size: 0.85rem; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
-    .badge-success { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-    .badge-warning { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-    .badge-info { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
-    
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
-    .stat-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; }
-    .stat-lbl { font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-    .stat-val { font-size: 2rem; font-weight: 800; margin-top: 0.5rem; }
+    .status-badges { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+    .badge { padding: 6px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge-success { background: rgba(37, 211, 102, 0.18); color: #25d366; border: 1px solid rgba(37, 211, 102, 0.4); }
+    .badge-warning { background: rgba(255, 188, 17, 0.18); color: var(--wa-yellow); border: 1px solid rgba(255, 188, 17, 0.4); }
+    .badge-info { background: rgba(83, 189, 235, 0.18); color: var(--wa-blue); border: 1px solid rgba(83, 189, 235, 0.4); }
+    .badge-active { background: rgba(0, 168, 132, 0.2); color: var(--wa-green-hover); border: 1px solid var(--wa-green); }
 
-    .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
-    @media (max-width: 850px) { .main-grid { grid-template-columns: 1fr; } }
+    .container { max-width: 1140px; margin: 1.5rem auto 0; padding: 0 1rem; }
+
+    /* STATS GRID */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .stat-card { background: var(--wa-panel); border: 1px solid var(--wa-border); border-radius: 12px; padding: 1.2rem; position: relative; overflow: hidden; }
+    .stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--wa-border); }
+    .stat-card.st-pend::before { background: var(--wa-yellow); }
+    .stat-card.st-succ::before { background: #25d366; }
+    .stat-card.st-fail::before { background: var(--wa-red); }
+    .stat-card.st-tot::before { background: var(--wa-blue); }
     
-    .panel-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; }
-    .panel-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; }
-    
-    .qr-container { text-align: center; padding: 1rem; background: #0b1120; border-radius: 12px; border: 1px dashed var(--card-border); min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-    .qr-container img { width: 220px; height: 220px; border-radius: 12px; }
+    .stat-lbl { font-size: 0.78rem; color: var(--wa-text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-val { font-size: 2.1rem; font-weight: 800; margin-top: 0.4rem; }
 
-    textarea { width: 100%; height: 120px; background: #0b1120; border: 1px solid var(--card-border); border-radius: 10px; color: var(--text); padding: 0.8rem; font-size: 0.9rem; resize: vertical; outline: none; margin-bottom: 1rem; }
-    textarea:focus { border-color: var(--accent); }
+    /* MAIN PANELS GRID */
+    .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+    @media (max-width: 880px) { .main-grid { grid-template-columns: 1fr; } }
 
-    .btn-group { display: flex; gap: 0.75rem; flex-wrap: wrap; }
-    button { background: var(--accent); color: #000; border: none; padding: 10px 18px; border-radius: 10px; font-weight: 700; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
-    button:hover { opacity: 0.9; transform: translateY(-1px); }
-    button.btn-sec { background: #1e293b; color: var(--text); border: 1px solid var(--card-border); }
-    button.btn-sec:hover { background: #334155; }
-    button.btn-danger { background: rgba(244, 63, 94, 0.2); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.4); }
-    button.btn-danger:hover { background: #f43f5e; color: #fff; }
+    .panel-card { background: var(--wa-panel); border: 1px solid var(--wa-border); border-radius: 12px; padding: 1.4rem; }
+    .panel-header-title { font-size: 1.05rem; font-weight: 700; color: var(--wa-text); margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--wa-border); padding-bottom: 0.75rem; }
+    .panel-header-title span { display: flex; align-items: center; gap: 8px; }
 
-    .table-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-    th { padding: 10px 14px; background: #0b1120; color: var(--text-muted); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; border-bottom: 1px solid var(--card-border); }
-    td { padding: 12px 14px; border-bottom: 1px solid var(--card-border); word-break: break-all; }
+    /* QR CONTAINER */
+    .qr-container { text-align: center; padding: 1.2rem; background: var(--wa-card-inner); border-radius: 10px; border: 1px dashed var(--wa-border); min-height: 290px; display: flex; flex-direction: column; align-items: center; justify-center: center; }
+    .qr-container img { width: 220px; height: 220px; border-radius: 10px; border: 4px solid #fff; }
+
+    /* INPUTS & TEXTAREAS */
+    textarea { width: 100%; height: 110px; background: var(--wa-card-inner); border: 1px solid var(--wa-border); border-radius: 8px; color: var(--wa-text); padding: 0.8rem; font-size: 0.9rem; resize: vertical; outline: none; margin-bottom: 0.8rem; transition: border-color 0.2s; }
+    textarea:focus { border-color: var(--wa-green); }
+
+    select { background: var(--wa-card-inner); border: 1px solid var(--wa-border); color: var(--wa-text); padding: 10px 12px; border-radius: 8px; font-weight: 600; outline: none; transition: border-color 0.2s; }
+    select:focus { border-color: var(--wa-green); }
+
+    /* BUTTONS */
+    .btn-group { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    button { background: var(--wa-green); color: #111b21; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 700; font-size: 0.88rem; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    button:hover { background: var(--wa-green-hover); transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button.btn-sec { background: var(--wa-panel-header); color: var(--wa-text); border: 1px solid var(--wa-border); }
+    button.btn-sec:hover { background: #222e35; border-color: var(--wa-green); }
+    button.btn-danger { background: rgba(234, 0, 56, 0.2); color: #f87171; border: 1px solid rgba(234, 0, 56, 0.4); }
+    button.btn-danger:hover { background: var(--wa-red); color: #fff; }
+
+    /* TABLE */
+    .table-card { background: var(--wa-panel); border: 1px solid var(--wa-border); border-radius: 12px; padding: 1.4rem; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.88rem; }
+    th { padding: 10px 14px; background: var(--wa-panel-header); color: var(--wa-text-muted); font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--wa-border); }
+    td { padding: 12px 14px; border-bottom: 1px solid var(--wa-border); word-break: break-all; }
     tr:hover td { background: rgba(255,255,255,0.02); }
 
-    .status-tag { padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; }
-    .tag-pending { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
-    .tag-success { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-    .tag-failed { background: rgba(244, 63, 94, 0.2); color: #fda4af; }
+    .status-tag { padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }
+    .tag-pending { background: rgba(255, 188, 17, 0.18); color: var(--wa-yellow); border: 1px solid rgba(255, 188, 17, 0.3); }
+    .tag-success { background: rgba(37, 211, 102, 0.18); color: #25d366; border: 1px solid rgba(37, 211, 102, 0.3); }
+    .tag-failed { background: rgba(234, 0, 56, 0.18); color: #f87171; border: 1px solid rgba(234, 0, 56, 0.3); }
     
-    .toast { position: fixed; bottom: 20px; right: 20px; background: #1e293b; color: #fff; padding: 12px 20px; border-radius: 10px; border: 1px solid var(--accent); box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none; z-index: 99; }
+    .toast { position: fixed; bottom: 24px; right: 24px; background: var(--wa-panel-header); color: #fff; padding: 12px 22px; border-radius: 10px; border: 1px solid var(--wa-green); box-shadow: 0 10px 30px rgba(0,0,0,0.6); display: none; z-index: 99; font-weight: 600; font-size: 0.9rem; }
   </style>
 </head>
 <body>
 
+  <!-- TOP HEADER BAR -->
+  <div class="top-bar">
+    <div class="brand-title">
+      <div class="brand-icon">💬</div>
+      <span>Whabot MZ Dashboard</span>
+    </div>
+
+    <div class="status-badges">
+      <div id="conn-badge" class="badge ${isConnected ? 'badge-success' : 'badge-warning'}">
+        ${isConnected ? '🟢 Conectado' : '🟡 Desconectado'}
+      </div>
+      <div id="proc-badge" class="badge ${isProcessing ? 'badge-active' : 'badge-info'}">
+        ${isProcessing ? '⚡ Processando Fila...' : '⏸️ Fila em Espera'}
+      </div>
+      <div id="rdb-badge" class="badge ${rdbModeEnabled ? 'badge-info' : 'badge-warning'}">
+        ${rdbModeEnabled ? '⚡ RDB Real-Time Ativo' : '⏹️ RDB Inativo'}
+      </div>
+    </div>
+  </div>
+
   <div class="container">
-    <header>
-      <div>
-        <div class="logo">⚡ WHABOT DASHBOARD</div>
-        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">Gerenciador de Grupos do WhatsApp & API REST (Fly.io)</p>
-      </div>
-
-      <div class="status-badges">
-        <div id="conn-badge" class="badge ${isConnected ? 'badge-success' : 'badge-warning'}">
-          ${isConnected ? '🟢 Conectado' : '🟡 Desconectado'}
-        </div>
-        <div id="rdb-badge" class="badge ${rdbModeEnabled ? 'badge-info' : 'badge-warning'}">
-          ${rdbModeEnabled ? '⚡ Modo Real-Time (RDB) Ativo' : '⏹️ RDB Inativo'}
-        </div>
-      </div>
-    </header>
-
-    <!-- ESTÁTISTICAS -->
+    <!-- STATS CARDS -->
     <div class="stats-grid">
-      <div class="stat-card">
+      <div class="stat-card st-pend">
         <div class="stat-lbl">Pendentes</div>
-        <div class="stat-val" id="st-pending" style="color: #fbbf24;">${stats.pending}</div>
+        <div class="stat-val" id="st-pending" style="color: var(--wa-yellow);">${stats.pending}</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-lbl">Sucessos</div>
-        <div class="stat-val" id="st-success" style="color: #34d399;">${stats.success}</div>
+      <div class="stat-card st-succ">
+        <div class="stat-lbl">Entrou (Sucessos)</div>
+        <div class="stat-val" id="st-success" style="color: #25d366;">${stats.success}</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-lbl">Falhas</div>
-        <div class="stat-val" id="st-failed" style="color: #fda4af;">${stats.failed}</div>
+      <div class="stat-card st-fail">
+        <div class="stat-lbl">Falhas / Rate Limit</div>
+        <div class="stat-val" id="st-failed" style="color: #f87171;">${stats.failed}</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-lbl">Total Geral</div>
-        <div class="stat-val" id="st-total" style="color: #38bdf8;">${stats.total}</div>
+      <div class="stat-card st-tot">
+        <div class="stat-lbl">Total Geral Cadastrado</div>
+        <div class="stat-val" id="st-total" style="color: var(--wa-blue);">${stats.total}</div>
       </div>
     </div>
 
-    <!-- CARDS PRINCIPAIS -->
+    <!-- MAIN GRID CONTROLS -->
     <div class="main-grid">
       <!-- CONEXÃO / QR CODE -->
       <div class="panel-card">
-        <div class="panel-title">📲 Conexão WhatsApp</div>
+        <div class="panel-header-title">
+          <span>📲 Sessão & Conexão WhatsApp</span>
+          <button id="btn-reset-session" class="btn-danger" style="padding: 5px 12px; font-size: 0.78rem;">📲 Gerar Novo QR Code</button>
+        </div>
         <div class="qr-container" id="qr-box">
           ${
             isConnected
-              ? '<div style="color: #34d399; font-size: 1.2rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Pronto para entrar em grupos via Web ou WhatsApp.</p>'
+              ? '<div style="color: #25d366; font-size: 1.25rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--wa-text-muted); font-size: 0.85rem; margin-top: 10px;">O bot está respondendo e pronto para processar grupos.</p>'
               : initialQrUrl
-              ? `<img src="${initialQrUrl}" alt="QR Code WhatsApp" /><p style="color: var(--text-muted); font-size: 0.85rem;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>`
-              : '<p style="color: var(--text-muted);">⏳ Inicializando QR Code...</p>'
+              ? `<img src="${initialQrUrl}" alt="QR Code WhatsApp" /><p style="color: var(--wa-text-muted); font-size: 0.85rem; margin-top: 10px;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>`
+              : '<p style="color: var(--wa-text-muted);">⏳ Carregando código QR...</p>'
           }
         </div>
       </div>
 
-      <!-- INSERIR LINKS & AÇÕES -->
+      <!-- INSERIR LINKS & PAINEL DE CONTROLE -->
       <div class="panel-card">
-        <div class="panel-title">📥 Adicionar Links de Grupos</div>
-        <textarea id="links-input" placeholder="Cole aqui os links dos grupos (chat.whatsapp.com/...)"></textarea>
+        <div class="panel-header-title">
+          <span>📥 Adicionar Links de Grupos</span>
+        </div>
+        <textarea id="links-input" placeholder="Cole aqui os links dos grupos (https://chat.whatsapp.com/...)"></textarea>
         
-        <div class="btn-group" style="margin-bottom: 1rem;">
+        <div class="btn-group" style="margin-bottom: 1.2rem;">
           <button id="btn-add">➕ Adicionar Links</button>
-          <button id="btn-process" class="btn-sec">⚡ Processar Fila</button>
+          <button id="btn-process" class="btn-sec">⚡ Iniciar Processamento</button>
+          <button id="btn-stop" class="btn-danger">🛑 Parar Processamento</button>
           <button id="btn-toggle-rdb" class="btn-sec">🔄 Alternar RDB</button>
         </div>
 
-        <div style="border-top: 1px solid var(--card-border); padding-top: 1rem; margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
-          <button id="btn-reset-session" class="btn-danger">📲 Desconectar / Gerar Novo QR Code</button>
-          <button id="btn-clear" class="btn-danger" style="background: rgba(244, 63, 94, 0.1); border-color: rgba(244, 63, 94, 0.2);">🗑️ Limpar Todos os Links</button>
+        <div style="border-top: 1px solid var(--wa-border); padding-top: 1rem; margin-top: 0.5rem; display: flex; justify-content: flex-end;">
+          <button id="btn-clear" class="btn-danger">🗑️ Limpar Todos os Links</button>
         </div>
       </div>
     </div>
 
     <!-- AUTO-RESPONDER INTELIGENTE -->
-    <div class="panel-card" style="margin-bottom: 2rem;">
-      <div class="panel-title">🤖 Auto-Responder Inteligente (PV / GP / ALL)</div>
+    <div class="panel-card" style="margin-bottom: 1.5rem;">
+      <div class="panel-header-title">
+        <span>🤖 Auto-Responder Inteligente (PV / GP / ALL)</span>
+      </div>
       <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 1.5rem; align-items: start;">
         <div>
-          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Modo de Atuação:</label>
-          <select id="autoresp-mode" style="width: 100%; background: #0b1120; border: 1px solid var(--card-border); color: #fff; padding: 10px 12px; border-radius: 8px; font-weight: 700; outline: none; margin-bottom: 1rem;">
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Modo de Atuação:</label>
+          <select id="autoresp-mode" style="width: 100%; margin-bottom: 1rem;">
             <option value="off">⏹️ Desativado</option>
             <option value="pv">👤 Apenas Mensagens Privadas (PV)</option>
             <option value="gp">👥 Apenas Grupos (GP) + Menção Invisível</option>
             <option value="all">🌐 Todos (PV + Grupos)</option>
           </select>
-          <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;">
+          <p style="font-size: 0.8rem; color: var(--wa-text-muted); line-height: 1.5;">
             • <b>Menção Invisível:</b> Notifica todos no grupo.<br>
             • <b>Variação Anti-Ban:</b> Emojis dinâmicos.<br>
-            • <b>Limite:</b> Máx 1 resposta por conversa/hora.<br>
-            • <b>Delay Seguro:</b> 5s - 8s entre envios.
+            • <b>Cooldown:</b> Máx 1 resposta por conversa/hora.<br>
+            • <b>Delay Seguro:</b> 10s - 20s entre entradas.
           </p>
         </div>
         <div>
-          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem / Legenda de Resposta:</label>
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem / Legenda de Resposta:</label>
           <textarea id="autoresp-msg" style="height: 70px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem ou legenda do vídeo..."></textarea>
 
-          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📹 Vídeo (opcional — será enviado com a legenda acima):</label>
-          <div id="video-upload-area" style="border: 2px dashed var(--card-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-video-input').click()">
-            <div id="video-upload-label" style="color: var(--text-muted); font-size: 0.85rem;">📂 Clique para selecionar um vídeo MP4 (máx 50MB)</div>
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📹 Vídeo (opcional — será enviado com a legenda acima):</label>
+          <div id="video-upload-area" style="border: 2px dashed var(--wa-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-video-input').click()">
+            <div id="video-upload-label" style="color: var(--wa-text-muted); font-size: 0.85rem;">📂 Clique para selecionar um vídeo MP4 (máx 50MB)</div>
             <input id="autoresp-video-input" type="file" accept="video/mp4,video/*" style="display:none">
           </div>
-          <div id="video-status-bar" style="display:none; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
-            <span id="video-status-text" style="font-size:0.82rem; color:#34d399;">✅ Vídeo carregado</span>
-            <button id="btn-remove-video" style="background: rgba(244,63,94,0.15); border: 1px solid rgba(244,63,94,0.3); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover</button>
+          <div id="video-status-bar" style="display:none; background: rgba(37,211,102,0.12); border: 1px solid rgba(37,211,102,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
+            <span id="video-status-text" style="font-size:0.82rem; color:#25d366;">✅ Vídeo carregado</span>
+            <button id="btn-remove-video" style="background: rgba(234,0,56,0.2); border: 1px solid rgba(234,0,56,0.4); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover</button>
           </div>
 
           <button id="btn-save-autoresp" style="width: 100%;">💾 Salvar Configurações do Auto-Responder</button>
@@ -691,9 +733,11 @@ const server = http.createServer(async (req, res) => {
 
     <!-- TABELA DE LINKS -->
     <div class="table-card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <div class="panel-title" style="margin-bottom: 0;">📋 Grupos Cadastrados no Banco / Fila</div>
-        <input id="search-table" type="text" placeholder="Filtrar grupos..." style="background: #0b1120; border: 1px solid var(--card-border); color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div class="panel-header-title" style="margin-bottom: 0; border: none; padding: 0;">
+          <span>📋 Grupos Cadastrados no Banco / Fila</span>
+        </div>
+        <input id="search-table" type="text" placeholder="Filtrar grupos por nome ou URL..." style="background: var(--wa-card-inner); border: 1px solid var(--wa-border); color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 0.85rem; outline: none; min-width: 250px;">
       </div>
 
       <table>
@@ -706,7 +750,7 @@ const server = http.createServer(async (req, res) => {
           </tr>
         </thead>
         <tbody id="table-body">
-          <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Carregando grupos...</td></tr>
+          <tr><td colspan="4" style="text-align: center; color: var(--wa-text-muted);">Carregando grupos...</td></tr>
         </tbody>
       </table>
     </div>
@@ -732,9 +776,13 @@ const server = http.createServer(async (req, res) => {
           connBadge.className = 'badge ' + (d.isConnected ? 'badge-success' : 'badge-warning');
           connBadge.innerHTML = d.isConnected ? '🟢 Conectado' : '🟡 Desconectado';
 
+          const procBadge = document.getElementById('proc-badge');
+          procBadge.className = 'badge ' + (d.isProcessing ? 'badge-active' : 'badge-info');
+          procBadge.innerHTML = d.isProcessing ? '⚡ Processando Fila...' : '⏸️ Fila em Espera';
+
           const rdbBadge = document.getElementById('rdb-badge');
           rdbBadge.className = 'badge ' + (d.rdbModeEnabled ? 'badge-info' : 'badge-warning');
-          rdbBadge.innerHTML = d.rdbModeEnabled ? '⚡ Modo Real-Time (RDB) Ativo' : '⏹️ RDB Inativo';
+          rdbBadge.innerHTML = d.rdbModeEnabled ? '⚡ RDB Real-Time Ativo' : '⏹️ RDB Inativo';
 
           // Stats
           document.getElementById('st-pending').innerText = d.stats.pending;
@@ -762,11 +810,11 @@ const server = http.createServer(async (req, res) => {
           // QR Code Box
           const qrBox = document.getElementById('qr-box');
           if (d.isConnected) {
-            qrBox.innerHTML = '<div style="color: #34d399; font-size: 1.2rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Pronto para entrar em grupos via Web ou WhatsApp.</p>';
+            qrBox.innerHTML = '<div style="color: #25d366; font-size: 1.25rem; font-weight: 700;">✅ WhatsApp Conectado & Ativo</div><p style="color: var(--wa-text-muted); font-size: 0.85rem; margin-top: 10px;">O bot está respondendo e pronto para processar grupos.</p>';
           } else if (d.latestQR) {
-            qrBox.innerHTML = '<img src="' + d.latestQR + '" alt="QR Code WhatsApp" /><p style="color: var(--text-muted); font-size: 0.85rem;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>';
+            qrBox.innerHTML = '<img src="' + d.latestQR + '" alt="QR Code WhatsApp" /><p style="color: var(--wa-text-muted); font-size: 0.85rem; margin-top: 10px;">Abra o WhatsApp > Aparelhos Conectados > Conectar um Aparelho</p>';
           } else {
-            qrBox.innerHTML = '<p style="color: var(--text-muted);">⏳ Inicializando QR Code...</p>';
+            qrBox.innerHTML = '<p style="color: var(--wa-text-muted);">⏳ Carregando código QR...</p>';
           }
         }
       } catch (e) {}
@@ -782,19 +830,19 @@ const server = http.createServer(async (req, res) => {
           const items = d.data.filter(i => (i.url || '').toLowerCase().includes(filter) || (i.group_name || '').toLowerCase().includes(filter));
           
           if (items.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Nenhum grupo encontrado</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--wa-text-muted);">Nenhum grupo encontrado</td></tr>';
             return;
           }
 
           tbody.innerHTML = items.map((item, idx) => {
             let tagClass = 'tag-pending';
             if (item.status === 'success') tagClass = 'tag-success';
-            if (item.status === 'failed') tagClass = 'tag-failed';
+            if (item.status === 'failed' || item.status === 'rate_limited') tagClass = 'tag-failed';
 
             return '<tr>' +
               '<td>' + (idx + 1) + '</td>' +
               '<td style="font-weight: 600;">' + (item.group_name || '—') + '</td>' +
-              '<td><a href="' + item.url + '" target="_blank" style="color: var(--accent); text-decoration: none;">' + item.url + '</a></td>' +
+              '<td><a href="' + item.url + '" target="_blank" style="color: var(--wa-green); text-decoration: none;">' + item.url + '</a></td>' +
               '<td><span class="status-tag ' + tagClass + '">' + (item.status || 'pending').toUpperCase() + '</span></td>' +
             '</tr>';
           }).join('');
@@ -836,6 +884,22 @@ const server = http.createServer(async (req, res) => {
         const d = await res.json();
         if (d.success) {
           showToast('⚡ Processamento da fila iniciado!');
+          updateStatus();
+        }
+      } catch (e) {}
+    });
+
+    document.getElementById('btn-stop').addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop' })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast('🛑 Processamento interrompido!');
+          updateStatus();
         }
       } catch (e) {}
     });
@@ -894,7 +958,7 @@ const server = http.createServer(async (req, res) => {
         if (!file) return;
         if (file.size > 50 * 1024 * 1024) { showToast('⚠️ Vídeo deve ter no máximo 50MB!'); return; }
         videoLabel.textContent = '⏳ Enviando vídeo para o servidor...';
-        videoArea.style.borderColor = '#f59e0b';
+        videoArea.style.borderColor = '#ffbc11';
         const formData = new FormData();
         formData.append('video', file, 'autoresp_video.mp4');
         try {
@@ -902,18 +966,18 @@ const server = http.createServer(async (req, res) => {
           const d = await res.json();
           if (d.success) {
             videoLabel.textContent = '✅ Vídeo enviado! Clique para trocar.';
-            videoArea.style.borderColor = '#10b981';
+            videoArea.style.borderColor = '#25d366';
             document.getElementById('video-status-bar').style.display = 'flex';
             document.getElementById('video-status-text').textContent = '✅ Vídeo carregado: ' + file.name;
             showToast('📹 Vídeo carregado com sucesso!');
           } else {
             videoLabel.textContent = '❌ Erro ao carregar. Tente novamente.';
-            videoArea.style.borderColor = '#f43f5e';
+            videoArea.style.borderColor = '#ea0038';
             showToast('Erro: ' + (d.error || 'falha no upload'));
           }
         } catch (e) {
           videoLabel.textContent = '❌ Erro de rede. Tente novamente.';
-          videoArea.style.borderColor = '#f43f5e';
+          videoArea.style.borderColor = '#ea0038';
           showToast('Erro ao enviar vídeo!');
         }
       });
@@ -928,7 +992,7 @@ const server = http.createServer(async (req, res) => {
           const d = await res.json();
           if (d.success) {
             document.getElementById('video-status-bar').style.display = 'none';
-            videoArea.style.borderColor = 'var(--card-border)';
+            videoArea.style.borderColor = 'var(--wa-border)';
             videoLabel.textContent = '📂 Clique para selecionar um vídeo MP4 (máx 50MB)';
             if (videoInput) videoInput.value = '';
             showToast('🗑️ Vídeo removido!');
@@ -1657,6 +1721,7 @@ async function processHybridQueue(sock, targetJid) {
   }
 
   isProcessing = true;
+  abortProcessing = false;
   console.log(`\n⚡ Processando ${pendingLinks.length} links pendentes (${isUsingLocalFallback ? 'Fila Local' : 'PostgreSQL'})...`);
 
   const batchResults = [];
@@ -1664,12 +1729,24 @@ async function processHybridQueue(sock, targetJid) {
   let scheduledNextRun = null;
 
   for (let i = 0; i < pendingLinks.length; i++) {
+    if (abortProcessing) {
+      console.log('🛑 [Processamento] Cancelado pelo usuário.');
+      isProcessing = false;
+      break;
+    }
+
     const item = pendingLinks[i];
 
     if (i > 0) {
       const delayMs = getRandomDelay(config.minDelaySeconds, config.maxDelaySeconds);
       console.log(`⏱️ Delay (${(delayMs / 1000).toFixed(1)}s)...`);
       await sleep(delayMs);
+    }
+
+    if (abortProcessing) {
+      console.log('🛑 [Processamento] Cancelado durante o delay pelo usuário.');
+      isProcessing = false;
+      break;
     }
 
     console.log(`[${i + 1}/${pendingLinks.length}] Entrando no grupo (código: ${item.code})...`);
