@@ -60,6 +60,69 @@ let rdbTargetJid = null;
 let deletePendingMap = new Map(); // targetJid -> timestamp limite
 
 // ---------------------------------------------------------
+// MÓDULO AUTO-RESPONDER INTELIGENTE (PV / GP / ALL)
+// ---------------------------------------------------------
+let autoRespMode = 'off'; // 'off' | 'pv' | 'gp' | 'all'
+let autoRespMsg = 'Olá! Para mais informações, ofertas e catálogo completo de produtos, acesse o nosso grupo oficial do WhatsApp.';
+let autoRespCooldowns = new Map(); // targetJid -> timestamp (1 hora de cooldown por conversa)
+const AUTO_RESP_COOLDOWN_MS = 60 * 60 * 1000; // 3600000ms (1 hora)
+let autoRespProcessing = false;
+let autoRespQueue = []; // Fila de disparos assíncronos com delay seguro (anti-ban)
+
+// Função para gerar variações únicas com emojis aleatórios (evita detecção de spam pelo WhatsApp)
+function gerarMensagemAutoResposta(msgBase) {
+  const emojis = ['✨', '🔥', '📌', '🚀', '📍', '⭐', '⚡', '💡', '✅', '📲', '🎯', '🛒', '💬', '🎁', '🔔', '📢'];
+  const e1 = emojis[Math.floor(Math.random() * emojis.length)];
+  const e2 = emojis[Math.floor(Math.random() * emojis.length)];
+  const e3 = emojis[Math.floor(Math.random() * emojis.length)];
+
+  const variacoes = [
+    `${e1} ${msgBase}\n\n${e2} _Resposta automática_ ${e3}`,
+    `${e2} ${msgBase}\n\n${e1} _Atendimento automático_`,
+    `${msgBase}\n\n${e1}${e2} _Mensagem enviada automaticamente_ ${e3}`,
+    `${e3} *Aviso:* ${msgBase}\n\n${e1} _Canal oficial_`
+  ];
+
+  return variacoes[Math.floor(Math.random() * variacoes.length)];
+}
+
+// Processador da fila de respostas com delay seguro entre mensagens
+async function processAutoRespQueue() {
+  if (autoRespProcessing || autoRespQueue.length === 0) return;
+  autoRespProcessing = true;
+
+  while (autoRespQueue.length > 0) {
+    const item = autoRespQueue.shift();
+    try {
+      const { sock, fromJid, isGroup, msgObj } = item;
+      const textoUnico = gerarMensagemAutoResposta(autoRespMsg);
+      let mentions = [];
+
+      if (isGroup) {
+        try {
+          const metadata = await sock.groupMetadata(fromJid);
+          mentions = metadata.participants ? metadata.participants.map(p => p.id) : [];
+        } catch (e) {}
+      }
+
+      await sock.sendMessage(fromJid, {
+        text: textoUnico,
+        mentions: isGroup ? mentions : []
+      }, { quoted: msgObj });
+
+      console.log(`🤖 [Auto-Responder] Resposta enviada para ${fromJid} (${isGroup ? 'GP' : 'PV'}) com menção invisível e variação de emoji.`);
+    } catch (err) {
+      console.error('❌ Erro no envio do Auto-Responder:', err.message);
+    }
+
+    // Delay seguro de 5 a 8 segundos entre respostas para evitar ban do WhatsApp
+    await new Promise(r => setTimeout(r, Math.floor(Math.random() * 3000) + 5000));
+  }
+
+  autoRespProcessing = false;
+}
+
+// ---------------------------------------------------------
 // Servidor HTTP & API REST para Render
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 3000;
@@ -227,6 +290,9 @@ const server = http.createServer(async (req, res) => {
         success: true,
         isConnected,
         rdbModeEnabled,
+        autoRespMode,
+        autoRespMsg,
+        autoRespCooldownCount: autoRespCooldowns.size,
         isProcessing,
         isScheduledWaitActive: queueManager.isScheduledWaitActive(),
         nextScheduledRun: queueManager.getNextScheduledRun(),
@@ -237,13 +303,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint REST API: POST /api/trigger (Ações da Dashboard: processar, alternar RDB)
+  // Endpoint REST API: POST /api/trigger (Ações da Dashboard: processar, alternar RDB, Auto-Responder)
   if (pathname === '/api/trigger' && method === 'POST') {
     let bodyText = '';
     req.on('data', chunk => { bodyText += chunk.toString(); });
     req.on('end', async () => {
       try {
         const body = JSON.parse(bodyText || '{}');
+        if (body.action === 'setAutoResp') {
+          if (body.mode) autoRespMode = body.mode;
+          if (body.msg !== undefined) autoRespMsg = body.msg;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, autoRespMode, autoRespMsg }));
+          return;
+        }
         if (body.action === 'toggleRdb') {
           rdbModeEnabled = !rdbModeEnabled;
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -457,6 +530,33 @@ const server = http.createServer(async (req, res) => {
       </div>
     </div>
 
+    <!-- AUTO-RESPONDER INTELIGENTE -->
+    <div class="panel-card" style="margin-bottom: 2rem;">
+      <div class="panel-title">🤖 Auto-Responder Inteligente (PV / GP / ALL)</div>
+      <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 1.5rem; align-items: start;">
+        <div>
+          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Modo de Atuação:</label>
+          <select id="autoresp-mode" style="width: 100%; background: #0b1120; border: 1px solid var(--card-border); color: #fff; padding: 10px 12px; border-radius: 8px; font-weight: 700; outline: none; margin-bottom: 1rem;">
+            <option value="off">⏹️ Desativado</option>
+            <option value="pv">👤 Apenas Mensagens Privadas (PV)</option>
+            <option value="gp">👥 Apenas Grupos (GP) + Menção Invisível</option>
+            <option value="all">🌐 Todos (PV + Grupos)</option>
+          </select>
+          <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;">
+            • <b>Menção Invisível:</b> Notifica todos no grupo.<br>
+            • <b>Variação Anti-Ban:</b> Emojis dinâmicos.<br>
+            • <b>Limite:</b> Máx 1 resposta por conversa/hora.<br>
+            • <b>Delay Seguro:</b> 5s - 8s entre envios.
+          </p>
+        </div>
+        <div>
+          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem de Resposta Configurada:</label>
+          <textarea id="autoresp-msg" style="height: 85px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem de resposta automática..."></textarea>
+          <button id="btn-save-autoresp" style="width: 100%;">💾 Salvar Configurações do Auto-Responder</button>
+        </div>
+      </div>
+    </div>
+
     <!-- TABELA DE LINKS -->
     <div class="table-card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
@@ -509,6 +609,16 @@ const server = http.createServer(async (req, res) => {
           document.getElementById('st-success').innerText = d.stats.success;
           document.getElementById('st-failed').innerText = d.stats.failed;
           document.getElementById('st-total').innerText = d.stats.total;
+
+          // Auto-Responder UI
+          const modeSel = document.getElementById('autoresp-mode');
+          if (modeSel && !modeSel.dataset.userEditing) {
+            modeSel.value = d.autoRespMode || 'off';
+          }
+          const msgArea = document.getElementById('autoresp-msg');
+          if (msgArea && !msgArea.dataset.userEditing) {
+            msgArea.value = d.autoRespMsg || '';
+          }
 
           // QR Code Box
           const qrBox = document.getElementById('qr-box');
@@ -634,6 +744,27 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) {}
     });
+
+    const btnSaveAutoResp = document.getElementById('btn-save-autoresp');
+    if (btnSaveAutoResp) {
+      btnSaveAutoResp.addEventListener('click', async () => {
+        const mode = document.getElementById('autoresp-mode').value;
+        const msg = document.getElementById('autoresp-msg').value;
+        try {
+          const res = await fetch('/api/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'setAutoResp', mode, msg })
+          });
+          const d = await res.json();
+          if (d.success) {
+            showToast('🤖 Auto-Responder atualizado com sucesso!');
+          }
+        } catch (e) {
+          showToast('Erro ao salvar Auto-Responder!');
+        }
+      });
+    }
 
     document.getElementById('search-table').addEventListener('input', loadTable);
 
@@ -814,6 +945,27 @@ async function startBot() {
           // Após auto-captura, continua para verificar se também é um comando
         }
 
+        // =========================================================
+        // 🤖 AUTO-RESPONDER INTELIGENTE (PV / GP / ALL)
+        // Responde mensagens, marca mensagem enviada, usa menção invisível em grupos
+        // Cooldown de 1 hora por JID para evitar spam e ban do WhatsApp
+        // =========================================================
+        if (autoRespMode !== 'off' && !trimmedText.startsWith('!')) {
+          const isGroup = fromJid.endsWith('@g.us');
+          let responder = (autoRespMode === 'all') ||
+                          (autoRespMode === 'gp' && isGroup) ||
+                          (autoRespMode === 'pv' && !isGroup);
+
+          if (responder) {
+            const ultimoEnvio = autoRespCooldowns.get(fromJid) || 0;
+            if (Date.now() - ultimoEnvio >= AUTO_RESP_COOLDOWN_MS) {
+              autoRespCooldowns.set(fromJid, Date.now());
+              autoRespQueue.push({ sock, fromJid, isGroup, msgObj: msg });
+              setImmediate(processAutoRespQueue);
+            }
+          }
+        }
+
         // Filtro de administradores para comandos
         if (config.adminJids.length > 0 && !config.adminJids.includes(senderJid.split('@')[0])) {
           continue;
@@ -841,6 +993,13 @@ async function startBot() {
 📢 *Disparo & Menção Invisível:*
 • \`!divulgar <mensagem>\` : Dispara a mensagem para todos os grupos com **chat aberto**, com **menção invisível** (notificação para todos os membros!).
 • \`!tagall <mensagem>\` ou \`!marcar <mensagem>\` : Envia mensagem no grupo marcando TODOS os membros com **menção invisível**.
+
+🤖 *Auto-Responder Inteligente:*
+• \`!autoresp off\` : Desativar auto-resposta.
+• \`!autoresp pv <msg>\` : Responder automaticamente PVs.
+• \`!autoresp gp <msg>\` : Responder automaticamente em Grupos.
+• \`!autoresp all <msg>\` : Responder PV + Grupos.
+_Status atual:_ *${autoRespMode.toUpperCase()}*
 
 📊 *Estatísticas no Banco de Dados:*
 • \`!status\` / \`!stats\` : Exibe resumo dos grupos.
@@ -1050,6 +1209,35 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
               text: `❌ Erro ao buscar lista de grupos: ${err.message}`
             });
           }
+          continue;
+        }
+
+        // ---------------------------------------------------------
+        // 3.3 COMANDO: !autoresp <modo> [mensagem] (Auto-Responder Inteligente)
+        // Modos: off | pv | gp | all
+        // Exemplo: !autoresp gp Olá, veja nosso catálogo!
+        // ---------------------------------------------------------
+        if (lowerText.startsWith('!autoresp')) {
+          const parts = trimmedText.slice('!autoresp'.length).trim().split(/\s+/);
+          const modo = (parts[0] || '').toLowerCase();
+          const mensagem = parts.slice(1).join(' ').trim();
+
+          if (!['off', 'pv', 'gp', 'all'].includes(modo)) {
+            await sock.sendMessage(fromJid, {
+              text: `🤖 *Auto-Responder - Uso:*\n\n• \`!autoresp off\` — Desativar\n• \`!autoresp pv Sua mensagem\` — Responder PVs\n• \`!autoresp gp Sua mensagem\` — Responder Grupos\n• \`!autoresp all Sua mensagem\` — Responder tudo\n\n_Status atual:_ *${autoRespMode.toUpperCase()}*\n_Mensagem:_ ${autoRespMsg}`
+            });
+            continue;
+          }
+
+          autoRespMode = modo;
+          if (mensagem) autoRespMsg = mensagem;
+
+          const modoEmoji = { off: '⏹️', pv: '💬', gp: '👥', all: '🌐' }[modo];
+          const modoNome = { off: 'DESATIVADO', pv: 'Somente PV', gp: 'Somente Grupos', all: 'PV + Grupos' }[modo];
+
+          await sock.sendMessage(fromJid, {
+            text: `🤖 *Auto-Responder Atualizado!*\n\n${modoEmoji} Modo: *${modoNome}*\n📝 Mensagem: _${autoRespMsg}_\n⏱️ Cooldown: 1 hora por conversa\n\n_Variação de emojis e delay anti-ban ativados!_`
+          });
           continue;
         }
 
