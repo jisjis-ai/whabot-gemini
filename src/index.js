@@ -69,6 +69,11 @@ const AUTO_RESP_COOLDOWN_MS = 60 * 60 * 1000; // 3600000ms (1 hora)
 let autoRespProcessing = false;
 let autoRespQueue = []; // Fila de disparos assíncronos com delay seguro (anti-ban)
 
+// Caminho do vídeo do auto-responder (armazenado no volume persistente do Fly.io)
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
+const AUTO_RESP_VIDEO_PATH = path.join(DATA_DIR, 'autoresp_video.mp4');
+let autoRespHasVideo = fs.existsSync(AUTO_RESP_VIDEO_PATH); // true se vídeo carregado
+
 // Função para gerar variações únicas com emojis aleatórios (evita detecção de spam pelo WhatsApp)
 function gerarMensagemAutoResposta(msgBase) {
   const emojis = ['✨', '🔥', '📌', '🚀', '📍', '⭐', '⚡', '💡', '✅', '📲', '🎯', '🛒', '💬', '🎁', '🔔', '📢'];
@@ -105,10 +110,21 @@ async function processAutoRespQueue() {
         } catch (e) {}
       }
 
-      await sock.sendMessage(fromJid, {
-        text: textoUnico,
-        mentions: isGroup ? mentions : []
-      }, { quoted: msgObj });
+      // Envia vídeo com legenda se houver vídeo configurado, caso contrário envia texto
+      if (autoRespHasVideo && fs.existsSync(AUTO_RESP_VIDEO_PATH)) {
+        const videoBuffer = fs.readFileSync(AUTO_RESP_VIDEO_PATH);
+        await sock.sendMessage(fromJid, {
+          video: videoBuffer,
+          caption: textoUnico,
+          mentions: isGroup ? mentions : [],
+          mimetype: 'video/mp4'
+        }, { quoted: msgObj });
+      } else {
+        await sock.sendMessage(fromJid, {
+          text: textoUnico,
+          mentions: isGroup ? mentions : []
+        }, { quoted: msgObj });
+      }
 
       console.log(`🤖 [Auto-Responder] Resposta enviada para ${fromJid} (${isGroup ? 'GP' : 'PV'}) com menção invisível e variação de emoji.`);
     } catch (err) {
@@ -292,6 +308,7 @@ const server = http.createServer(async (req, res) => {
         rdbModeEnabled,
         autoRespMode,
         autoRespMsg,
+        autoRespHasVideo,
         autoRespCooldownCount: autoRespCooldowns.size,
         isProcessing,
         isScheduledWaitActive: queueManager.isScheduledWaitActive(),
@@ -300,6 +317,95 @@ const server = http.createServer(async (req, res) => {
         stats
       })
     );
+    return;
+  }
+
+  // Endpoint: POST /api/autoresp/video — faz upload do vídeo do auto-responder
+  if (pathname === '/api/autoresp/video' && method === 'POST') {
+    const contentType = req.headers['content-type'] || '';
+    if (!contentType.includes('multipart/form-data')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Envie o vídeo como multipart/form-data' }));
+      return;
+    }
+    const boundary = contentType.split('boundary=')[1];
+    if (!boundary) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Boundary não encontrado' }));
+      return;
+    }
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = Buffer.concat(chunks);
+        const boundaryBuf = Buffer.from('--' + boundary);
+        const parts = [];
+        let start = 0;
+        while (start < body.length) {
+          const idx = body.indexOf(boundaryBuf, start);
+          if (idx === -1) break;
+          const nextStart = idx + boundaryBuf.length;
+          if (body[nextStart] === 45 && body[nextStart + 1] === 45) break; // '--' = end
+          const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), nextStart);
+          if (headerEnd === -1) break;
+          const header = body.slice(nextStart + 2, headerEnd).toString();
+          const dataStart = headerEnd + 4;
+          const nextBoundary = body.indexOf(boundaryBuf, dataStart);
+          const dataEnd = nextBoundary === -1 ? body.length : nextBoundary - 2;
+          if (header.includes('filename') && header.toLowerCase().includes('video')) {
+            parts.push(body.slice(dataStart, dataEnd));
+          } else if (header.includes('filename')) {
+            parts.push(body.slice(dataStart, dataEnd));
+          }
+          start = nextBoundary === -1 ? body.length : nextBoundary;
+        }
+        if (parts.length === 0) {
+          // Fallback: tratar como raw body (caso frontend não use multipart corretamente)
+          // Salvar o body inteiro após o header como tentativa
+          const firstHeader = body.indexOf(Buffer.from('\r\n\r\n'));
+          const videoData = firstHeader !== -1 ? body.slice(firstHeader + 4) : body;
+          // Remover o boundary final se existir
+          const endBoundary = Buffer.from('\r\n--' + boundary + '--');
+          const endIdx = videoData.indexOf(endBoundary);
+          const finalData = endIdx !== -1 ? videoData.slice(0, endIdx) : videoData;
+          if (finalData.length > 1000) {
+            fs.writeFileSync(AUTO_RESP_VIDEO_PATH, finalData);
+            autoRespHasVideo = true;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, size: finalData.length }));
+            return;
+          }
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Nenhum vídeo encontrado no envio' }));
+          return;
+        }
+        const videoData = parts[0];
+        fs.writeFileSync(AUTO_RESP_VIDEO_PATH, videoData);
+        autoRespHasVideo = true;
+        console.log(`📹 [Auto-Responder] Vídeo carregado: ${videoData.length} bytes → ${AUTO_RESP_VIDEO_PATH}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, size: videoData.length }));
+      } catch (err) {
+        console.error('❌ Erro ao salvar vídeo do auto-responder:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Endpoint: DELETE /api/autoresp/video — remove o vídeo do auto-responder
+  if (pathname === '/api/autoresp/video' && method === 'DELETE') {
+    try {
+      if (fs.existsSync(AUTO_RESP_VIDEO_PATH)) fs.unlinkSync(AUTO_RESP_VIDEO_PATH);
+      autoRespHasVideo = false;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'Vídeo removido com sucesso' }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
     return;
   }
 
@@ -550,8 +656,19 @@ const server = http.createServer(async (req, res) => {
           </p>
         </div>
         <div>
-          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem de Resposta Configurada:</label>
-          <textarea id="autoresp-msg" style="height: 85px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem de resposta automática..."></textarea>
+          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem / Legenda de Resposta:</label>
+          <textarea id="autoresp-msg" style="height: 70px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem ou legenda do vídeo..."></textarea>
+
+          <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📹 Vídeo (opcional — será enviado com a legenda acima):</label>
+          <div id="video-upload-area" style="border: 2px dashed var(--card-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-video-input').click()">
+            <div id="video-upload-label" style="color: var(--text-muted); font-size: 0.85rem;">📂 Clique para selecionar um vídeo MP4 (máx 50MB)</div>
+            <input id="autoresp-video-input" type="file" accept="video/mp4,video/*" style="display:none">
+          </div>
+          <div id="video-status-bar" style="display:none; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
+            <span id="video-status-text" style="font-size:0.82rem; color:#34d399;">✅ Vídeo carregado</span>
+            <button id="btn-remove-video" style="background: rgba(244,63,94,0.15); border: 1px solid rgba(244,63,94,0.3); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover</button>
+          </div>
+
           <button id="btn-save-autoresp" style="width: 100%;">💾 Salvar Configurações do Auto-Responder</button>
         </div>
       </div>
@@ -618,6 +735,13 @@ const server = http.createServer(async (req, res) => {
           const msgArea = document.getElementById('autoresp-msg');
           if (msgArea && !msgArea.dataset.userEditing) {
             msgArea.value = d.autoRespMsg || '';
+          }
+          // Video status bar
+          const vsBar = document.getElementById('video-status-bar');
+          const vsText = document.getElementById('video-status-text');
+          if (vsBar && vsText) {
+            vsBar.style.display = d.autoRespHasVideo ? 'flex' : 'none';
+            if (d.autoRespHasVideo) vsText.textContent = '✅ Vídeo carregado e ativo';
           }
 
           // QR Code Box
@@ -744,6 +868,59 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) {}
     });
+
+    // ── Video upload handling ──
+    const videoInput = document.getElementById('autoresp-video-input');
+    const videoArea = document.getElementById('video-upload-area');
+    const videoLabel = document.getElementById('video-upload-label');
+    if (videoInput) {
+      videoInput.addEventListener('change', async () => {
+        const file = videoInput.files[0];
+        if (!file) return;
+        if (file.size > 50 * 1024 * 1024) { showToast('⚠️ Vídeo deve ter no máximo 50MB!'); return; }
+        videoLabel.textContent = '⏳ Enviando vídeo para o servidor...';
+        videoArea.style.borderColor = '#f59e0b';
+        const formData = new FormData();
+        formData.append('video', file, 'autoresp_video.mp4');
+        try {
+          const res = await fetch('/api/autoresp/video', { method: 'POST', body: formData });
+          const d = await res.json();
+          if (d.success) {
+            videoLabel.textContent = '✅ Vídeo enviado! Clique para trocar.';
+            videoArea.style.borderColor = '#10b981';
+            document.getElementById('video-status-bar').style.display = 'flex';
+            document.getElementById('video-status-text').textContent = '✅ Vídeo carregado: ' + file.name;
+            showToast('📹 Vídeo carregado com sucesso!');
+          } else {
+            videoLabel.textContent = '❌ Erro ao carregar. Tente novamente.';
+            videoArea.style.borderColor = '#f43f5e';
+            showToast('Erro: ' + (d.error || 'falha no upload'));
+          }
+        } catch (e) {
+          videoLabel.textContent = '❌ Erro de rede. Tente novamente.';
+          videoArea.style.borderColor = '#f43f5e';
+          showToast('Erro ao enviar vídeo!');
+        }
+      });
+    }
+
+    const btnRemoveVideo = document.getElementById('btn-remove-video');
+    if (btnRemoveVideo) {
+      btnRemoveVideo.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const res = await fetch('/api/autoresp/video', { method: 'DELETE' });
+          const d = await res.json();
+          if (d.success) {
+            document.getElementById('video-status-bar').style.display = 'none';
+            videoArea.style.borderColor = 'var(--card-border)';
+            videoLabel.textContent = '📂 Clique para selecionar um vídeo MP4 (máx 50MB)';
+            if (videoInput) videoInput.value = '';
+            showToast('🗑️ Vídeo removido!');
+          }
+        } catch (e) { showToast('Erro ao remover vídeo'); }
+      });
+    }
 
     const btnSaveAutoResp = document.getElementById('btn-save-autoresp');
     if (btnSaveAutoResp) {
