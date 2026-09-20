@@ -144,4 +144,11 @@ export class QueueManager {
   getHistorySummary() {
     return this.data.history;
   }
+
+  clearAll() {
+    this.data.pending = [];
+    this.data.history = [];
+    this.data.nextScheduledRun = null;
+    this.saveQueue();
+  }
 }

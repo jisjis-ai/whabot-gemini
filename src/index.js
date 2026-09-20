@@ -283,6 +283,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Endpoint REST API: DELETE /api/links (Limpar todos os links do banco de dados e da fila local)
+  if (pathname === '/api/links' && method === 'DELETE') {
+    let deletedCount = 0;
+    try {
+      deletedCount = await deleteAllLinks();
+    } catch (e) {
+      console.warn('⚠️ Erro ao deletar no PostgreSQL, limpando fila local:', e.message);
+    }
+    queueManager.clearAll();
+    console.log('🗑️ [API] Todos os links foram removidos do banco e da fila local.');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, deletedCount }));
+    return;
+  }
+
   // Endpoint REST API: GET /api/status (Status ao vivo para a dashboard)
   if (pathname === '/api/status' && method === 'GET') {
     let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
@@ -1236,8 +1251,7 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
             try {
               deletedCount = await deleteAllLinks();
             } catch (e) {}
-            queueManager.data.pending = [];
-            queueManager.saveQueue();
+            queueManager.clearAll();
 
             await sock.sendMessage(fromJid, {
               text: `🗑️ *Banco de Dados e Fila Limpos!*\n\nForam excluídos os registros do banco de dados e da fila local.`
