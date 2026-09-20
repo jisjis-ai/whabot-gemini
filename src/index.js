@@ -70,10 +70,33 @@ const AUTO_RESP_COOLDOWN_MS = 60 * 60 * 1000; // 3600000ms (1 hora)
 let autoRespProcessing = false;
 let autoRespQueue = []; // Fila de disparos assíncronos com delay seguro (anti-ban)
 
-// Caminho do vídeo do auto-responder (armazenado no volume persistente do Fly.io)
+// Mídia do auto-responder (Vídeo, Imagem, Áudio, Documento/PDF, etc.)
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
-const AUTO_RESP_VIDEO_PATH = path.join(DATA_DIR, 'autoresp_video.mp4');
-let autoRespHasVideo = fs.existsSync(AUTO_RESP_VIDEO_PATH); // true se vídeo carregado
+const AUTO_RESP_MEDIA_PATH = path.join(DATA_DIR, 'autoresp_media');
+const AUTO_RESP_META_PATH = path.join(DATA_DIR, 'autoresp_media_meta.json');
+
+let autoRespMediaMeta = {
+  hasMedia: false,
+  fileName: '',
+  mimeType: '',
+  size: 0
+};
+
+if (fs.existsSync(AUTO_RESP_META_PATH)) {
+  try {
+    const raw = fs.readFileSync(AUTO_RESP_META_PATH, 'utf-8');
+    autoRespMediaMeta = { ...autoRespMediaMeta, ...JSON.parse(raw) };
+    autoRespMediaMeta.hasMedia = fs.existsSync(AUTO_RESP_MEDIA_PATH);
+  } catch (e) {}
+} else if (fs.existsSync(path.join(DATA_DIR, 'autoresp_video.mp4'))) {
+  const legacyVideoPath = path.join(DATA_DIR, 'autoresp_video.mp4');
+  try {
+    fs.renameSync(legacyVideoPath, AUTO_RESP_MEDIA_PATH);
+    const size = fs.statSync(AUTO_RESP_MEDIA_PATH).size;
+    autoRespMediaMeta = { hasMedia: true, fileName: 'autoresp_video.mp4', mimeType: 'video/mp4', size };
+    fs.writeFileSync(AUTO_RESP_META_PATH, JSON.stringify(autoRespMediaMeta, null, 2));
+  } catch (e) {}
+}
 
 // Função para gerar variações únicas com emojis aleatórios (evita detecção de spam pelo WhatsApp)
 function gerarMensagemAutoResposta(msgBase) {
@@ -111,15 +134,47 @@ async function processAutoRespQueue() {
         } catch (e) {}
       }
 
-      // Envia vídeo com legenda se houver vídeo configurado, caso contrário envia texto
-      if (autoRespHasVideo && fs.existsSync(AUTO_RESP_VIDEO_PATH)) {
-        const videoBuffer = fs.readFileSync(AUTO_RESP_VIDEO_PATH);
-        await sock.sendMessage(fromJid, {
-          video: videoBuffer,
-          caption: textoUnico,
-          mentions: isGroup ? mentions : [],
-          mimetype: 'video/mp4'
-        }, { quoted: msgObj });
+      // Envia mídia (vídeo, imagem, áudio ou documento) se houver arquivo configurado, caso contrário envia texto
+      if (autoRespMediaMeta.hasMedia && fs.existsSync(AUTO_RESP_MEDIA_PATH)) {
+        const mediaBuffer = fs.readFileSync(AUTO_RESP_MEDIA_PATH);
+        const mime = (autoRespMediaMeta.mimeType || '').toLowerCase();
+
+        if (mime.startsWith('video/')) {
+          await sock.sendMessage(fromJid, {
+            video: mediaBuffer,
+            caption: textoUnico,
+            mentions: isGroup ? mentions : [],
+            mimetype: mime || 'video/mp4'
+          }, { quoted: msgObj });
+        } else if (mime.startsWith('image/')) {
+          await sock.sendMessage(fromJid, {
+            image: mediaBuffer,
+            caption: textoUnico,
+            mentions: isGroup ? mentions : [],
+            mimetype: mime || 'image/jpeg'
+          }, { quoted: msgObj });
+        } else if (mime.startsWith('audio/')) {
+          await sock.sendMessage(fromJid, {
+            audio: mediaBuffer,
+            mimetype: mime || 'audio/mp4',
+            ptt: false
+          }, { quoted: msgObj });
+          if (textoUnico) {
+            await sock.sendMessage(fromJid, {
+              text: textoUnico,
+              mentions: isGroup ? mentions : []
+            }, { quoted: msgObj });
+          }
+        } else {
+          // Documento (PDF, DOCX, ZIP, TXT, etc.)
+          await sock.sendMessage(fromJid, {
+            document: mediaBuffer,
+            caption: textoUnico,
+            fileName: autoRespMediaMeta.fileName || 'arquivo',
+            mentions: isGroup ? mentions : [],
+            mimetype: mime || 'application/octet-stream'
+          }, { quoted: msgObj });
+        }
       } else {
         await sock.sendMessage(fromJid, {
           text: textoUnico,
@@ -127,7 +182,7 @@ async function processAutoRespQueue() {
         }, { quoted: msgObj });
       }
 
-      console.log(`🤖 [Auto-Responder] Resposta enviada para ${fromJid} (${isGroup ? 'GP' : 'PV'}) com menção invisível e variação de emoji.`);
+      console.log(`🤖 [Auto-Responder] Resposta enviada para ${fromJid} (${isGroup ? 'GP' : 'PV'}) com mídia/texto.`);
     } catch (err) {
       console.error('❌ Erro no envio do Auto-Responder:', err.message);
     }
@@ -327,7 +382,8 @@ const server = http.createServer(async (req, res) => {
         rdbModeEnabled,
         autoRespMode,
         autoRespMsg,
-        autoRespHasVideo,
+        autoRespHasVideo: autoRespMediaMeta.hasMedia,
+        autoRespMedia: autoRespMediaMeta,
         autoRespCooldownCount: autoRespCooldowns.size,
         isProcessing,
         isScheduledWaitActive: queueManager.isScheduledWaitActive(),
@@ -339,12 +395,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint: POST /api/autoresp/video — faz upload do vídeo do auto-responder
-  if (pathname === '/api/autoresp/video' && method === 'POST') {
+  // Endpoint: POST /api/autoresp/media (ou /api/autoresp/video) — faz upload de qualquer mídia/arquivo do auto-responder
+  if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'POST') {
     const contentType = req.headers['content-type'] || '';
     if (!contentType.includes('multipart/form-data')) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Envie o vídeo como multipart/form-data' }));
+      res.end(JSON.stringify({ success: false, error: 'Envie o arquivo como multipart/form-data' }));
       return;
     }
     const boundary = contentType.split('boundary=')[1];
@@ -359,7 +415,10 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = Buffer.concat(chunks);
         const boundaryBuf = Buffer.from('--' + boundary);
-        const parts = [];
+        let fileData = null;
+        let filename = 'arquivo';
+        let mimeType = 'application/octet-stream';
+
         let start = 0;
         while (start < body.length) {
           const idx = body.indexOf(boundaryBuf, start);
@@ -372,41 +431,50 @@ const server = http.createServer(async (req, res) => {
           const dataStart = headerEnd + 4;
           const nextBoundary = body.indexOf(boundaryBuf, dataStart);
           const dataEnd = nextBoundary === -1 ? body.length : nextBoundary - 2;
-          if (header.includes('filename') && header.toLowerCase().includes('video')) {
-            parts.push(body.slice(dataStart, dataEnd));
-          } else if (header.includes('filename')) {
-            parts.push(body.slice(dataStart, dataEnd));
+
+          if (header.includes('filename=')) {
+            fileData = body.slice(dataStart, dataEnd);
+
+            const fnMatch = header.match(/filename=["']?([^"';\r\n]+)["']?/i);
+            if (fnMatch && fnMatch[1]) filename = fnMatch[1].trim();
+
+            const ctMatch = header.match(/Content-Type:\s*([^\r\n]+)/i);
+            if (ctMatch && ctMatch[1]) mimeType = ctMatch[1].trim();
+
+            break;
           }
           start = nextBoundary === -1 ? body.length : nextBoundary;
         }
-        if (parts.length === 0) {
-          // Fallback: tratar como raw body (caso frontend não use multipart corretamente)
-          // Salvar o body inteiro após o header como tentativa
-          const firstHeader = body.indexOf(Buffer.from('\r\n\r\n'));
-          const videoData = firstHeader !== -1 ? body.slice(firstHeader + 4) : body;
-          // Remover o boundary final se existir
-          const endBoundary = Buffer.from('\r\n--' + boundary + '--');
-          const endIdx = videoData.indexOf(endBoundary);
-          const finalData = endIdx !== -1 ? videoData.slice(0, endIdx) : videoData;
-          if (finalData.length > 1000) {
-            fs.writeFileSync(AUTO_RESP_VIDEO_PATH, finalData);
-            autoRespHasVideo = true;
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, size: finalData.length }));
-            return;
-          }
+
+        if (!fileData || fileData.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Nenhum vídeo encontrado no envio' }));
+          res.end(JSON.stringify({ success: false, error: 'Nenhum arquivo encontrado no envio' }));
           return;
         }
-        const videoData = parts[0];
-        fs.writeFileSync(AUTO_RESP_VIDEO_PATH, videoData);
-        autoRespHasVideo = true;
-        console.log(`📹 [Auto-Responder] Vídeo carregado: ${videoData.length} bytes → ${AUTO_RESP_VIDEO_PATH}`);
+
+        // Inferir mimeType se vier genérico
+        if (mimeType === 'application/octet-stream' || !mimeType) {
+          const ext = path.extname(filename).toLowerCase();
+          if (['.mp4', '.mkv', '.webm', '.avi', '.mov'].includes(ext)) mimeType = 'video/mp4';
+          else if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) mimeType = 'image/jpeg';
+          else if (['.mp3', '.ogg', '.wav', '.m4a'].includes(ext)) mimeType = 'audio/mp4';
+          else if (ext === '.pdf') mimeType = 'application/pdf';
+        }
+
+        fs.writeFileSync(AUTO_RESP_MEDIA_PATH, fileData);
+        autoRespMediaMeta = {
+          hasMedia: true,
+          fileName: filename,
+          mimeType: mimeType,
+          size: fileData.length
+        };
+        fs.writeFileSync(AUTO_RESP_META_PATH, JSON.stringify(autoRespMediaMeta, null, 2));
+
+        console.log(`📎 [Auto-Responder] Mídia/Arquivo carregado: ${filename} (${mimeType}, ${fileData.length} bytes)`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, size: videoData.length }));
+        res.end(JSON.stringify({ success: true, size: fileData.length, meta: autoRespMediaMeta }));
       } catch (err) {
-        console.error('❌ Erro ao salvar vídeo do auto-responder:', err.message);
+        console.error('❌ Erro ao salvar arquivo do auto-responder:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
       }
@@ -414,13 +482,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Endpoint: DELETE /api/autoresp/video — remove o vídeo do auto-responder
-  if (pathname === '/api/autoresp/video' && method === 'DELETE') {
+  // Endpoint: DELETE /api/autoresp/media (ou /api/autoresp/video) — remove a mídia do auto-responder
+  if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'DELETE') {
     try {
-      if (fs.existsSync(AUTO_RESP_VIDEO_PATH)) fs.unlinkSync(AUTO_RESP_VIDEO_PATH);
-      autoRespHasVideo = false;
+      if (fs.existsSync(AUTO_RESP_MEDIA_PATH)) fs.unlinkSync(AUTO_RESP_MEDIA_PATH);
+      if (fs.existsSync(AUTO_RESP_META_PATH)) fs.unlinkSync(AUTO_RESP_META_PATH);
+      autoRespMediaMeta = { hasMedia: false, fileName: '', mimeType: '', size: 0 };
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Vídeo removido com sucesso' }));
+      res.end(JSON.stringify({ success: true, message: 'Arquivo/Mídia removido com sucesso' }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
@@ -716,14 +785,14 @@ const server = http.createServer(async (req, res) => {
           <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem / Legenda de Resposta:</label>
           <textarea id="autoresp-msg" style="height: 70px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem ou legenda do vídeo..."></textarea>
 
-          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📹 Vídeo (opcional — será enviado com a legenda acima):</label>
-          <div id="video-upload-area" style="border: 2px dashed var(--wa-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-video-input').click()">
-            <div id="video-upload-label" style="color: var(--wa-text-muted); font-size: 0.85rem;">📂 Clique para selecionar um vídeo MP4 (máx 50MB)</div>
-            <input id="autoresp-video-input" type="file" accept="video/mp4,video/*" style="display:none">
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📎 Anexo Mídia / Arquivo (Vídeo, Imagem, PDF, Áudio, Documento, etc.):</label>
+          <div id="media-upload-area" style="border: 2px dashed var(--wa-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-media-input').click()">
+            <div id="media-upload-label" style="color: var(--wa-text-muted); font-size: 0.85rem;">📂 Clique para selecionar qualquer arquivo (máx 100MB)</div>
+            <input id="autoresp-media-input" type="file" accept="*" style="display:none">
           </div>
-          <div id="video-status-bar" style="display:none; background: rgba(37,211,102,0.12); border: 1px solid rgba(37,211,102,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
-            <span id="video-status-text" style="font-size:0.82rem; color:#25d366;">✅ Vídeo carregado</span>
-            <button id="btn-remove-video" style="background: rgba(234,0,56,0.2); border: 1px solid rgba(234,0,56,0.4); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover</button>
+          <div id="media-status-bar" style="display:none; background: rgba(37,211,102,0.12); border: 1px solid rgba(37,211,102,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
+            <span id="media-status-text" style="font-size:0.82rem; color:#25d366;">✅ Arquivo anexado</span>
+            <button id="btn-remove-media" style="background: rgba(234,0,56,0.2); border: 1px solid rgba(234,0,56,0.4); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover Anexo</button>
           </div>
 
           <button id="btn-save-autoresp" style="width: 100%;">💾 Salvar Configurações do Auto-Responder</button>
@@ -766,6 +835,17 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => { t.style.display = 'none'; }, 3000);
     }
 
+    // Proteção contra sobrescrita durante digitação do usuário
+    const userEditingSet = new Set();
+    ['autoresp-msg', 'autoresp-mode', 'links-input'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('focus', () => userEditingSet.add(id));
+        el.addEventListener('blur', () => userEditingSet.delete(id));
+        el.addEventListener('input', () => userEditingSet.add(id));
+      }
+    });
+
     async function updateStatus() {
       try {
         const res = await fetch('/api/status');
@@ -790,21 +870,27 @@ const server = http.createServer(async (req, res) => {
           document.getElementById('st-failed').innerText = d.stats.failed;
           document.getElementById('st-total').innerText = d.stats.total;
 
-          // Auto-Responder UI
+          // Auto-Responder UI — NUNCA substitui se o usuário estiver focado ou digitando no campo!
           const modeSel = document.getElementById('autoresp-mode');
-          if (modeSel && !modeSel.dataset.userEditing) {
+          if (modeSel && document.activeElement !== modeSel && !userEditingSet.has('autoresp-mode')) {
             modeSel.value = d.autoRespMode || 'off';
           }
           const msgArea = document.getElementById('autoresp-msg');
-          if (msgArea && !msgArea.dataset.userEditing) {
+          if (msgArea && document.activeElement !== msgArea && !userEditingSet.has('autoresp-msg')) {
             msgArea.value = d.autoRespMsg || '';
           }
-          // Video status bar
-          const vsBar = document.getElementById('video-status-bar');
-          const vsText = document.getElementById('video-status-text');
-          if (vsBar && vsText) {
-            vsBar.style.display = d.autoRespHasVideo ? 'flex' : 'none';
-            if (d.autoRespHasVideo) vsText.textContent = '✅ Vídeo carregado e ativo';
+
+          // Status do anexo de mídia
+          const msBar = document.getElementById('media-status-bar');
+          const msText = document.getElementById('media-status-text');
+          const media = d.autoRespMedia || {};
+          if (msBar && msText) {
+            if (media.hasMedia) {
+              msBar.style.display = 'flex';
+              msText.textContent = '✅ Anexo: ' + (media.fileName || 'arquivo') + ' (' + (media.mimeType || 'mídia') + ')';
+            } else {
+              msBar.style.display = 'none';
+            }
           }
 
           // QR Code Box
@@ -866,6 +952,7 @@ const server = http.createServer(async (req, res) => {
         if (d.success) {
           showToast('✨ ' + d.addedCount + ' novos links adicionados!');
           input.value = '';
+          userEditingSet.delete('links-input');
           updateStatus();
           loadTable();
         }
@@ -948,56 +1035,56 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {}
     });
 
-    // ── Video upload handling ──
-    const videoInput = document.getElementById('autoresp-video-input');
-    const videoArea = document.getElementById('video-upload-area');
-    const videoLabel = document.getElementById('video-upload-label');
-    if (videoInput) {
-      videoInput.addEventListener('change', async () => {
-        const file = videoInput.files[0];
+    // ── Media / File upload handling (qualquer arquivo) ──
+    const mediaInput = document.getElementById('autoresp-media-input');
+    const mediaArea = document.getElementById('media-upload-area');
+    const mediaLabel = document.getElementById('media-upload-label');
+    if (mediaInput) {
+      mediaInput.addEventListener('change', async () => {
+        const file = mediaInput.files[0];
         if (!file) return;
-        if (file.size > 50 * 1024 * 1024) { showToast('⚠️ Vídeo deve ter no máximo 50MB!'); return; }
-        videoLabel.textContent = '⏳ Enviando vídeo para o servidor...';
-        videoArea.style.borderColor = '#ffbc11';
+        if (file.size > 100 * 1024 * 1024) { showToast('⚠️ Arquivo deve ter no máximo 100MB!'); return; }
+        mediaLabel.textContent = '⏳ Enviando ' + file.name + '...';
+        mediaArea.style.borderColor = '#ffbc11';
         const formData = new FormData();
-        formData.append('video', file, 'autoresp_video.mp4');
+        formData.append('media', file, file.name);
         try {
-          const res = await fetch('/api/autoresp/video', { method: 'POST', body: formData });
+          const res = await fetch('/api/autoresp/media', { method: 'POST', body: formData });
           const d = await res.json();
           if (d.success) {
-            videoLabel.textContent = '✅ Vídeo enviado! Clique para trocar.';
-            videoArea.style.borderColor = '#25d366';
-            document.getElementById('video-status-bar').style.display = 'flex';
-            document.getElementById('video-status-text').textContent = '✅ Vídeo carregado: ' + file.name;
-            showToast('📹 Vídeo carregado com sucesso!');
+            mediaLabel.textContent = '✅ ' + file.name + ' enviado! Clique para trocar.';
+            mediaArea.style.borderColor = '#25d366';
+            document.getElementById('media-status-bar').style.display = 'flex';
+            document.getElementById('media-status-text').textContent = '✅ Anexo: ' + file.name;
+            showToast('📎 Arquivo ' + file.name + ' anexado com sucesso!');
           } else {
-            videoLabel.textContent = '❌ Erro ao carregar. Tente novamente.';
-            videoArea.style.borderColor = '#ea0038';
+            mediaLabel.textContent = '❌ Erro ao carregar. Tente novamente.';
+            mediaArea.style.borderColor = '#ea0038';
             showToast('Erro: ' + (d.error || 'falha no upload'));
           }
         } catch (e) {
-          videoLabel.textContent = '❌ Erro de rede. Tente novamente.';
-          videoArea.style.borderColor = '#ea0038';
-          showToast('Erro ao enviar vídeo!');
+          mediaLabel.textContent = '❌ Erro de rede. Tente novamente.';
+          mediaArea.style.borderColor = '#ea0038';
+          showToast('Erro ao enviar arquivo!');
         }
       });
     }
 
-    const btnRemoveVideo = document.getElementById('btn-remove-video');
-    if (btnRemoveVideo) {
-      btnRemoveVideo.addEventListener('click', async (e) => {
+    const btnRemoveMedia = document.getElementById('btn-remove-media');
+    if (btnRemoveMedia) {
+      btnRemoveMedia.addEventListener('click', async (e) => {
         e.stopPropagation();
         try {
-          const res = await fetch('/api/autoresp/video', { method: 'DELETE' });
+          const res = await fetch('/api/autoresp/media', { method: 'DELETE' });
           const d = await res.json();
           if (d.success) {
-            document.getElementById('video-status-bar').style.display = 'none';
-            videoArea.style.borderColor = 'var(--wa-border)';
-            videoLabel.textContent = '📂 Clique para selecionar um vídeo MP4 (máx 50MB)';
-            if (videoInput) videoInput.value = '';
-            showToast('🗑️ Vídeo removido!');
+            document.getElementById('media-status-bar').style.display = 'none';
+            mediaArea.style.borderColor = 'var(--wa-border)';
+            mediaLabel.textContent = '📂 Clique para selecionar qualquer arquivo (máx 100MB)';
+            if (mediaInput) mediaInput.value = '';
+            showToast('🗑️ Anexo removido!');
           }
-        } catch (e) { showToast('Erro ao remover vídeo'); }
+        } catch (e) { showToast('Erro ao remover anexo'); }
       });
     }
 
@@ -1014,6 +1101,8 @@ const server = http.createServer(async (req, res) => {
           });
           const d = await res.json();
           if (d.success) {
+            userEditingSet.delete('autoresp-msg');
+            userEditingSet.delete('autoresp-mode');
             showToast('🤖 Auto-Responder atualizado com sucesso!');
           }
         } catch (e) {
