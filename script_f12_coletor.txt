@@ -465,7 +465,7 @@
         linksPorArquivo: 100,       // Baixa arquivo TXT a cada 100 links coletados
         tempoSemLinks: 25000,
         autoDownload: true,         // LIGADO: baixa arquivo TXT automaticamente
-        apiEndpoint: 'https://whabot-gemini-48ty.onrender.com/api/links'
+        apiEndpoint: 'https://whabot-mz.fly.dev/api/links'
     };
     
     const CHAVE_SALVAMENTO = 'coletor_whatsapp_mz_2026';
