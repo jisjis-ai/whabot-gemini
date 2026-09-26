@@ -1686,8 +1686,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, async () => {
-  console.log(`🌐 Servidor Web & API REST rodando na porta ${PORT}`);
+server.listen(PORT, '0.0.0.0', async () => {
+  console.log(`🌐 Servidor Web & API REST rodando na porta ${PORT} (0.0.0.0)`);
   try {
     await initDb();
   } catch (err) {
