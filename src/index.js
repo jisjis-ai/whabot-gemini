@@ -72,6 +72,10 @@ let autoRespQueue = []; // Fila de disparos assíncronos com delay seguro (anti-
 
 // Mídia do auto-responder (Vídeo, Imagem, Áudio, Documento/PDF, etc.)
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
+if (!fs.existsSync(DATA_DIR)) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+}
+
 const AUTO_RESP_MEDIA_PATH = path.join(DATA_DIR, 'autoresp_media');
 const AUTO_RESP_META_PATH = path.join(DATA_DIR, 'autoresp_media_meta.json');
 
@@ -96,6 +100,280 @@ if (fs.existsSync(AUTO_RESP_META_PATH)) {
     autoRespMediaMeta = { hasMedia: true, fileName: 'autoresp_video.mp4', mimeType: 'video/mp4', size };
     fs.writeFileSync(AUTO_RESP_META_PATH, JSON.stringify(autoRespMediaMeta, null, 2));
   } catch (e) {}
+}
+
+// ---------------------------------------------------------
+// MÓDULO DISPARO / DIVULGAÇÃO EM MASSA (MÍDIAS + TEXTO + MENÇÃO INVISÍVEL)
+// ---------------------------------------------------------
+const DIVULGAR_MEDIA_PATH = path.join(DATA_DIR, 'divulgar_media');
+const DIVULGAR_META_PATH = path.join(DATA_DIR, 'divulgar_media_meta.json');
+
+let divulgarMediaMeta = {
+  hasMedia: false,
+  fileName: '',
+  mimeType: '',
+  mediaType: '',
+  size: 0
+};
+
+if (fs.existsSync(DIVULGAR_META_PATH)) {
+  try {
+    const raw = fs.readFileSync(DIVULGAR_META_PATH, 'utf-8');
+    divulgarMediaMeta = { ...divulgarMediaMeta, ...JSON.parse(raw) };
+    divulgarMediaMeta.hasMedia = fs.existsSync(DIVULGAR_MEDIA_PATH);
+  } catch (e) {}
+}
+
+let isBroadcasting = false;
+let abortBroadcast = false;
+let broadcastProgress = {
+  active: false,
+  total: 0,
+  current: 0,
+  success: 0,
+  failed: 0,
+  mediaType: 'text',
+  message: '',
+  startedAt: null
+};
+
+// Funções auxiliares para inferir tipo e parse de multipart
+function inferMimeAndType(filename, rawMime) {
+  let mimeType = (rawMime || '').trim().toLowerCase();
+  const ext = path.extname(filename || '').toLowerCase();
+
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    if (['.mp4', '.mkv', '.webm', '.avi', '.mov', '.3gp'].includes(ext)) mimeType = 'video/mp4';
+    else if (['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'].includes(ext)) mimeType = 'image/jpeg';
+    else if (['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.opus'].includes(ext)) mimeType = 'audio/mp4';
+    else if (ext === '.pdf') mimeType = 'application/pdf';
+    else if (['.doc', '.docx'].includes(ext)) mimeType = 'application/msword';
+    else if (['.xls', '.xlsx'].includes(ext)) mimeType = 'application/vnd.ms-excel';
+    else if (['.zip', '.rar', '.7z'].includes(ext)) mimeType = 'application/zip';
+    else if (['.txt'].includes(ext)) mimeType = 'text/plain';
+    else mimeType = 'application/octet-stream';
+  }
+
+  let mediaType = 'document';
+  if (mimeType.startsWith('image/')) mediaType = 'image';
+  else if (mimeType.startsWith('video/')) mediaType = 'video';
+  else if (mimeType.startsWith('audio/')) mediaType = 'audio';
+  else mediaType = 'document';
+
+  return { mimeType, mediaType };
+}
+
+function parseMultipartBuffer(body, contentType) {
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = boundaryMatch ? (boundaryMatch[1] || boundaryMatch[2]) : null;
+  if (!boundary) return null;
+
+  const boundaryBuf = Buffer.from('--' + boundary);
+  let fileData = null;
+  let filename = 'arquivo';
+  let mimeType = 'application/octet-stream';
+  const fields = {};
+
+  let start = 0;
+  while (start < body.length) {
+    const idx = body.indexOf(boundaryBuf, start);
+    if (idx === -1) break;
+    const nextStart = idx + boundaryBuf.length;
+    if (body[nextStart] === 45 && body[nextStart + 1] === 45) break;
+    const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), nextStart);
+    if (headerEnd === -1) break;
+    const header = body.slice(nextStart + 2, headerEnd).toString();
+    const dataStart = headerEnd + 4;
+    const nextBoundary = body.indexOf(boundaryBuf, dataStart);
+    const dataEnd = nextBoundary === -1 ? body.length : nextBoundary - 2;
+
+    const nameMatch = header.match(/name=["']?([^"';\r\n]+)["']?/i);
+    const fieldName = nameMatch ? nameMatch[1] : null;
+
+    if (header.includes('filename=')) {
+      fileData = body.slice(dataStart, dataEnd);
+      const fnMatch = header.match(/filename=["']?([^"';\r\n]+)["']?/i);
+      if (fnMatch && fnMatch[1]) filename = fnMatch[1].trim();
+      const ctMatch = header.match(/Content-Type:\s*([^\r\n]+)/i);
+      if (ctMatch && ctMatch[1]) mimeType = ctMatch[1].trim();
+    } else if (fieldName) {
+      fields[fieldName] = body.slice(dataStart, dataEnd).toString('utf-8');
+    }
+
+    start = nextBoundary === -1 ? body.length : nextBoundary;
+  }
+
+  return { fileData, filename, mimeType, fields };
+}
+
+// Função central de divulgação para todos os grupos abertos com menção invisível
+async function executeBroadcast({
+  sock,
+  text = '',
+  mediaBuffer = null,
+  mediaType = null,
+  mimeType = null,
+  fileName = '',
+  fromJid = null
+}) {
+  if (isBroadcasting) {
+    if (fromJid) {
+      await sock.sendMessage(fromJid, {
+        text: `⚠️ Já existe uma divulgação em andamento (${broadcastProgress.current}/${broadcastProgress.total}). Aguarde a finalização.`
+      });
+    }
+    return { success: false, error: 'Divulgação já em andamento' };
+  }
+
+  if (!sock || !isConnected) {
+    if (fromJid) {
+      await sock.sendMessage(fromJid, { text: '⚠️ WhatsApp não está conectado no momento.' });
+    }
+    return { success: false, error: 'WhatsApp desconectado' };
+  }
+
+  isBroadcasting = true;
+  abortBroadcast = false;
+
+  let allGroups = [];
+  let openGroups = [];
+  try {
+    const groupsDict = await sock.groupFetchAllParticipating();
+    allGroups = Object.values(groupsDict);
+    openGroups = allGroups.filter(g => !g.announce);
+  } catch (err) {
+    console.error('❌ Erro ao buscar grupos para divulgação:', err.message);
+    isBroadcasting = false;
+    if (fromJid) {
+      await sock.sendMessage(fromJid, { text: `❌ Erro ao buscar lista de grupos: ${err.message}` });
+    }
+    return { success: false, error: err.message };
+  }
+
+  if (openGroups.length === 0) {
+    isBroadcasting = false;
+    if (fromJid) {
+      await sock.sendMessage(fromJid, {
+        text: `⚠️ Nenhum grupo com chat aberto encontrado (${allGroups.length} grupos verificados no total).`
+      });
+    }
+    return { success: false, error: 'Nenhum grupo aberto encontrado' };
+  }
+
+  const mediaLabel = mediaType === 'image' ? '🖼️ Imagem' :
+                     mediaType === 'video' ? '📹 Vídeo' :
+                     mediaType === 'audio' ? '🎵 Áudio' :
+                     mediaType === 'document' ? '📄 Documento/PDF' : '📝 Texto';
+
+  broadcastProgress = {
+    active: true,
+    total: openGroups.length,
+    current: 0,
+    success: 0,
+    failed: 0,
+    mediaType: mediaType || 'text',
+    message: text || '',
+    startedAt: new Date().toISOString()
+  };
+
+  if (fromJid) {
+    await sock.sendMessage(fromJid, {
+      text: `🚀 *Iniciando Disparo de Divulgação!*\n\n` +
+            `• Tipo: *${mediaLabel}*\n` +
+            `• Grupos Abertos: *${openGroups.length}*\n` +
+            `• Menção Invisível: *Ativada (Notifica todos os membros)*\n` +
+            `• Delay seguro: *3 segundos por grupo*\n\n` +
+            `_O bot enviará um relatório final assim que concluir._`
+    });
+  }
+
+  let sucessos = 0;
+  let falhas = 0;
+
+  for (let i = 0; i < openGroups.length; i++) {
+    if (abortBroadcast) {
+      console.log('🛑 [Divulgar] Divulgação cancelada pelo usuário.');
+      break;
+    }
+
+    const group = openGroups[i];
+    broadcastProgress.current = i + 1;
+
+    try {
+      const participants = group.participants ? group.participants.map(p => p.id) : [];
+
+      if (mediaBuffer && mediaType === 'image') {
+        await sock.sendMessage(group.id, {
+          image: mediaBuffer,
+          caption: text || '',
+          mentions: participants,
+          mimetype: mimeType || 'image/jpeg'
+        });
+      } else if (mediaBuffer && mediaType === 'video') {
+        await sock.sendMessage(group.id, {
+          video: mediaBuffer,
+          caption: text || '',
+          mentions: participants,
+          mimetype: mimeType || 'video/mp4'
+        });
+      } else if (mediaBuffer && mediaType === 'audio') {
+        await sock.sendMessage(group.id, {
+          audio: mediaBuffer,
+          mimetype: mimeType || 'audio/mp4',
+          ptt: true,
+          mentions: participants
+        });
+        if (text) {
+          await sock.sendMessage(group.id, {
+            text: text,
+            mentions: participants
+          });
+        }
+      } else if (mediaBuffer && mediaType === 'document') {
+        await sock.sendMessage(group.id, {
+          document: mediaBuffer,
+          caption: text || '',
+          fileName: fileName || 'documento.pdf',
+          mimetype: mimeType || 'application/pdf',
+          mentions: participants
+        });
+      } else {
+        await sock.sendMessage(group.id, {
+          text: text,
+          mentions: participants
+        });
+      }
+
+      sucessos++;
+      broadcastProgress.success = sucessos;
+      console.log(`📢 [Divulgar] (${i + 1}/${openGroups.length}) Enviado para "${group.subject || group.id}"`);
+    } catch (e) {
+      falhas++;
+      broadcastProgress.failed = falhas;
+      console.error(`❌ [Divulgar] Falha no grupo "${group.subject || group.id}": ${e.message}`);
+    }
+
+    if (i < openGroups.length - 1 && !abortBroadcast) {
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+
+  isBroadcasting = false;
+  broadcastProgress.active = false;
+
+  if (fromJid) {
+    try {
+      await sock.sendMessage(fromJid, {
+        text: `✅ *Divulgação Concluída!*\n\n` +
+              `• Tipo: *${mediaLabel}*\n` +
+              `• ✅ Sucessos: *${sucessos}*\n` +
+              `• ❌ Falhas: *${falhas}*\n` +
+              `• 📊 Total grupos abertos: *${openGroups.length}*`
+      });
+    } catch (e) {}
+  }
+
+  return { success: true, total: openGroups.length, sucessos, falhas };
 }
 
 // Função para gerar variações únicas com emojis aleatórios (evita detecção de spam pelo WhatsApp)
@@ -195,170 +473,451 @@ async function processAutoRespQueue() {
 }
 
 // ---------------------------------------------------------
-// Servidor HTTP & API REST para Render
+// Servidor HTTP & API REST para Fly.io / Render
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(async (req, res) => {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  const pathname = urlObj.pathname;
-  const method = req.method || 'GET';
+  try {
+    const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const pathname = urlObj.pathname;
+    const method = req.method || 'GET';
 
-  // Configurar cabeçalhos CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    // Configurar cabeçalhos CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+    if (method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
-  // Endpoint: Health Check
-  if (pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', connected: isConnected, rdbMode: rdbModeEnabled }));
-    return;
-  }
+    // Endpoint: Health Check
+    if (pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', connected: isConnected, rdbMode: rdbModeEnabled, isBroadcasting }));
+      return;
+    }
 
-  // Endpoint REST API: POST /api/links (Cadastrar novos links no Banco de Dados + Fila Local)
-  if (pathname === '/api/links' && method === 'POST') {
-    let bodyText = '';
-    req.on('data', (chunk) => {
-      bodyText += chunk;
-    });
+    // Endpoint REST API: POST /api/links (Cadastrar novos links no Banco de Dados + Fila Local)
+    if (pathname === '/api/links' && method === 'POST') {
+      let bodyText = '';
+      req.on('data', (chunk) => {
+        bodyText += chunk;
+      });
 
-    req.on('end', async () => {
-      try {
-        let textToParse = bodyText;
-        if (req.headers['content-type']?.includes('application/json')) {
-          const json = JSON.parse(bodyText || '{}');
-          if (Array.isArray(json.links)) {
-            textToParse = json.links.join('\n');
-          } else if (json.text) {
-            textToParse = json.text;
-          } else if (json.url) {
-            textToParse = json.url;
+      req.on('end', async () => {
+        try {
+          let textToParse = bodyText;
+          if (req.headers['content-type']?.includes('application/json')) {
+            const json = JSON.parse(bodyText || '{}');
+            if (Array.isArray(json.links)) {
+              textToParse = json.links.join('\n');
+            } else if (json.text) {
+              textToParse = json.text;
+            } else if (json.url) {
+              textToParse = json.url;
+            }
           }
+
+          const extracted = extractInviteCodes(textToParse);
+          
+          // Salva na fila local sempre como garantia
+          const localRes = queueManager.addToQueue(extracted, rdbTargetJid || 'api@system');
+
+          // Tenta salvar também no PostgreSQL se disponível
+          let dbAddedCount = 0;
+          let dbTotalPending = 0;
+          try {
+            const dbRes = await addLinks(extracted);
+            dbAddedCount = dbRes.addedCount;
+            dbTotalPending = dbRes.totalPending;
+          } catch (dbErr) {
+            console.warn('⚠️ Falha ao salvar no PostgreSQL (usando fila local):', dbErr.message);
+          }
+
+          const addedCount = dbAddedCount || localRes.addedCount;
+          const totalPending = dbTotalPending || localRes.totalPending;
+
+          // Se o modo RDB estiver ativo e NÃO estiver em pausa por rate limit, dispara o processamento
+          if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid && !queueManager.isScheduledWaitActive()) {
+            console.log(`⚡ [RDB Real-Time] ${addedCount} novos links detectados via API. Processando em tempo real...`);
+            setImmediate(() => {
+              processHybridQueue(globalSock, rdbTargetJid);
+            });
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              success: true,
+              extractedCount: extracted.length,
+              addedCount: addedCount,
+              totalPending: totalPending,
+              rdbTriggered: rdbModeEnabled
+            })
+          );
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
         }
+      });
+      return;
+    }
 
-        const extracted = extractInviteCodes(textToParse);
+    // Endpoint REST API: GET /api/links (Suporta inserção via Query Param ?add=... para burlar CSP de navegadores)
+    if (pathname === '/api/links' && method === 'GET') {
+      const addParam = urlObj.searchParams.get('add') || urlObj.searchParams.get('text') || urlObj.searchParams.get('link');
+
+      if (addParam) {
+        const extracted = extractInviteCodes(addParam);
         
-        // Salva na fila local sempre como garantia
         const localRes = queueManager.addToQueue(extracted, rdbTargetJid || 'api@system');
-
-        // Tenta salvar também no PostgreSQL se disponível
         let dbAddedCount = 0;
         let dbTotalPending = 0;
+
         try {
           const dbRes = await addLinks(extracted);
           dbAddedCount = dbRes.addedCount;
           dbTotalPending = dbRes.totalPending;
         } catch (dbErr) {
-          console.warn('⚠️ Falha ao salvar no PostgreSQL (usando fila local):', dbErr.message);
+          console.warn('⚠️ Falha no DB GET Ping (usando fila local):', dbErr.message);
         }
 
         const addedCount = dbAddedCount || localRes.addedCount;
         const totalPending = dbTotalPending || localRes.totalPending;
 
-        // Se o modo RDB estiver ativo e NÃO estiver em pausa por rate limit, dispara o processamento
         if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid && !queueManager.isScheduledWaitActive()) {
-          console.log(`⚡ [RDB Real-Time] ${addedCount} novos links detectados via API. Processando em tempo real...`);
+          console.log(`⚡ [RDB Real-Time] ${addedCount} novos links recebidos via Image Ping. Processando...`);
           setImmediate(() => {
             processHybridQueue(globalSock, rdbTargetJid);
           });
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            success: true,
-            extractedCount: extracted.length,
-            addedCount: addedCount,
-            totalPending: totalPending,
-            rdbTriggered: rdbModeEnabled
-          })
-        );
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
+        res.end(JSON.stringify({ success: true, addedCount, totalPending }));
+        return;
       }
-    });
-    return;
-  }
 
-  // Endpoint REST API: GET /api/links (Suporta inserção via Query Param ?add=... para burlar CSP de navegadores)
-  if (pathname === '/api/links' && method === 'GET') {
-    const addParam = urlObj.searchParams.get('add') || urlObj.searchParams.get('text') || urlObj.searchParams.get('link');
-
-    if (addParam) {
-      const extracted = extractInviteCodes(addParam);
-      
-      const localRes = queueManager.addToQueue(extracted, rdbTargetJid || 'api@system');
-      let dbAddedCount = 0;
-      let dbTotalPending = 0;
+      const statusFilter = urlObj.searchParams.get('status');
+      let links = [];
+      let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
 
       try {
-        const dbRes = await addLinks(extracted);
-        dbAddedCount = dbRes.addedCount;
-        dbTotalPending = dbRes.totalPending;
-      } catch (dbErr) {
-        console.warn('⚠️ Falha no DB GET Ping (usando fila local):', dbErr.message);
-      }
-
-      const addedCount = dbAddedCount || localRes.addedCount;
-      const totalPending = dbTotalPending || localRes.totalPending;
-
-      if (rdbModeEnabled && addedCount > 0 && globalSock && rdbTargetJid && !queueManager.isScheduledWaitActive()) {
-        console.log(`⚡ [RDB Real-Time] ${addedCount} novos links recebidos via Image Ping. Processando...`);
-        setImmediate(() => {
-          processHybridQueue(globalSock, rdbTargetJid);
-        });
+        links = await getAllLinks(statusFilter);
+        stats = await getStats();
+      } catch (err) {
+        links = queueManager.getPendingItems();
+        stats = { total: links.length, pending: links.length, success: 0, failed: 0, rate_limited: 0 };
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, addedCount, totalPending }));
+      res.end(JSON.stringify({ success: true, stats, count: links.length, data: links }));
       return;
     }
 
-    const statusFilter = urlObj.searchParams.get('status');
-    let links = [];
-    let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
-
-    try {
-      links = await getAllLinks(statusFilter);
-      stats = await getStats();
-    } catch (err) {
-      links = queueManager.getPendingItems();
-      stats = { total: links.length, pending: links.length, success: 0, failed: 0, rate_limited: 0 };
+    // Endpoint REST API: DELETE /api/links (Limpar todos os links do banco de dados e da fila local)
+    if (pathname === '/api/links' && method === 'DELETE') {
+      abortProcessing = true;
+      isProcessing = false;
+      queueManager.clearSchedule();
+      let deletedCount = 0;
+      try {
+        deletedCount = await deleteAllLinks();
+      } catch (e) {
+        console.warn('⚠️ Erro ao deletar no PostgreSQL, limpando fila local:', e.message);
+      }
+      queueManager.clearAll();
+      console.log('🗑️ [API] Todos os links foram removidos do banco e da fila local.');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, deletedCount }));
+      return;
     }
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, stats, count: links.length, data: links }));
-    return;
-  }
+    // Endpoint REST API: GET /api/status (Status ao vivo para a dashboard)
+    if (pathname === '/api/status' && method === 'GET') {
+      let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
+      try {
+        stats = await getStats();
+      } catch (e) {
+        const pending = queueManager.getPendingItems().length;
+        stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
+      }
 
-  // Endpoint REST API: DELETE /api/links (Limpar todos os links do banco de dados e da fila local)
-  if (pathname === '/api/links' && method === 'DELETE') {
-    abortProcessing = true;
-    isProcessing = false;
-    queueManager.clearSchedule();
-    let deletedCount = 0;
-    try {
-      deletedCount = await deleteAllLinks();
-    } catch (e) {
-      console.warn('⚠️ Erro ao deletar no PostgreSQL, limpando fila local:', e.message);
+      let qrDataUrl = null;
+      if (latestQR && !isConnected) {
+        try {
+          qrDataUrl = await QRCode.toDataURL(latestQR);
+        } catch (e) {}
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          success: true,
+          isConnected,
+          rdbModeEnabled,
+          autoRespMode,
+          autoRespMsg,
+          autoRespHasVideo: autoRespMediaMeta.hasMedia,
+          autoRespMedia: autoRespMediaMeta,
+          autoRespCooldownCount: autoRespCooldowns.size,
+          isBroadcasting,
+          broadcastProgress,
+          divulgarMedia: divulgarMediaMeta,
+          isProcessing,
+          isScheduledWaitActive: queueManager.isScheduledWaitActive(),
+          nextScheduledRun: queueManager.getNextScheduledRun(),
+          latestQR: qrDataUrl,
+          stats
+        })
+      );
+      return;
     }
-    queueManager.clearAll();
-    console.log('🗑️ [API] Todos os links foram removidos do banco e da fila local.');
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, deletedCount }));
-    return;
-  }
 
-  // Endpoint REST API: GET /api/status (Status ao vivo para a dashboard)
-  if (pathname === '/api/status' && method === 'GET') {
+    // Endpoint: POST /api/autoresp/media — Upload de mídia do Auto-Responder
+    if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'POST') {
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.includes('multipart/form-data')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Envie o arquivo como multipart/form-data' }));
+        return;
+      }
+
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const body = Buffer.concat(chunks);
+          const parsed = parseMultipartBuffer(body, contentType);
+
+          if (!parsed || !parsed.fileData || parsed.fileData.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Nenhum arquivo válido encontrado no envio' }));
+            return;
+          }
+
+          const { mimeType } = inferMimeAndType(parsed.filename, parsed.mimeType);
+
+          fs.writeFileSync(AUTO_RESP_MEDIA_PATH, parsed.fileData);
+          autoRespMediaMeta = {
+            hasMedia: true,
+            fileName: parsed.filename,
+            mimeType: mimeType,
+            size: parsed.fileData.length
+          };
+          fs.writeFileSync(AUTO_RESP_META_PATH, JSON.stringify(autoRespMediaMeta, null, 2));
+
+          console.log(`📎 [Auto-Responder] Mídia carregada: ${parsed.filename} (${mimeType}, ${parsed.fileData.length} bytes)`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, size: parsed.fileData.length, meta: autoRespMediaMeta }));
+        } catch (err) {
+          console.error('❌ Erro ao salvar arquivo do auto-responder:', err.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // Endpoint: DELETE /api/autoresp/media — Remove mídia do Auto-Responder
+    if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'DELETE') {
+      try {
+        if (fs.existsSync(AUTO_RESP_MEDIA_PATH)) fs.unlinkSync(AUTO_RESP_MEDIA_PATH);
+        if (fs.existsSync(AUTO_RESP_META_PATH)) fs.unlinkSync(AUTO_RESP_META_PATH);
+        autoRespMediaMeta = { hasMedia: false, fileName: '', mimeType: '', size: 0 };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Arquivo do auto-responder removido com sucesso' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+      return;
+    }
+
+    // Endpoint: POST /api/divulgar/media — Upload de mídia para Divulgação / Broadcast
+    if ((pathname === '/api/divulgar/media' || pathname === '/api/broadcast/media') && method === 'POST') {
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.includes('multipart/form-data')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Envie o arquivo como multipart/form-data' }));
+        return;
+      }
+
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const body = Buffer.concat(chunks);
+          const parsed = parseMultipartBuffer(body, contentType);
+
+          if (!parsed || !parsed.fileData || parsed.fileData.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Nenhum arquivo válido encontrado no envio' }));
+            return;
+          }
+
+          const { mimeType, mediaType } = inferMimeAndType(parsed.filename, parsed.mimeType);
+
+          fs.writeFileSync(DIVULGAR_MEDIA_PATH, parsed.fileData);
+          divulgarMediaMeta = {
+            hasMedia: true,
+            fileName: parsed.filename,
+            mimeType: mimeType,
+            mediaType: mediaType,
+            size: parsed.fileData.length
+          };
+          fs.writeFileSync(DIVULGAR_META_PATH, JSON.stringify(divulgarMediaMeta, null, 2));
+
+          console.log(`📢 [Divulgar] Mídia de divulgação carregada: ${parsed.filename} (${mimeType} - ${mediaType}, ${parsed.fileData.length} bytes)`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, size: parsed.fileData.length, meta: divulgarMediaMeta }));
+        } catch (err) {
+          console.error('❌ Erro ao salvar arquivo de divulgação:', err.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // Endpoint: DELETE /api/divulgar/media — Remove mídia de divulgação
+    if ((pathname === '/api/divulgar/media' || pathname === '/api/broadcast/media') && method === 'DELETE') {
+      try {
+        if (fs.existsSync(DIVULGAR_MEDIA_PATH)) fs.unlinkSync(DIVULGAR_MEDIA_PATH);
+        if (fs.existsSync(DIVULGAR_META_PATH)) fs.unlinkSync(DIVULGAR_META_PATH);
+        divulgarMediaMeta = { hasMedia: false, fileName: '', mimeType: '', mediaType: '', size: 0 };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Mídia de divulgação removida com sucesso' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+      return;
+    }
+
+    // Endpoint REST API: POST /api/trigger (Ações da Dashboard)
+    if (pathname === '/api/trigger' && method === 'POST') {
+      let bodyText = '';
+      req.on('data', chunk => { bodyText += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const body = JSON.parse(bodyText || '{}');
+          if (body.action === 'setAutoResp') {
+            if (body.mode) autoRespMode = body.mode;
+            if (body.msg !== undefined) autoRespMsg = body.msg;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, autoRespMode, autoRespMsg }));
+            return;
+          }
+          if (body.action === 'toggleRdb') {
+            rdbModeEnabled = !rdbModeEnabled;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, rdbModeEnabled }));
+            return;
+          }
+          if (body.action === 'process') {
+            if (globalSock) {
+              processHybridQueue(globalSock, rdbTargetJid || 'web@system');
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Processamento iniciado' }));
+            return;
+          }
+          if (body.action === 'stop') {
+            abortProcessing = true;
+            isProcessing = false;
+            queueManager.clearSchedule();
+            console.log('🛑 [API] Solicitada interrupção do processamento...');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Processamento interrompido' }));
+            return;
+          }
+          if (body.action === 'broadcast') {
+            if (!globalSock || !isConnected) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'WhatsApp desconectado' }));
+              return;
+            }
+            if (isBroadcasting) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Já existe uma divulgação em andamento' }));
+              return;
+            }
+
+            const msgTexto = (body.msg || '').trim();
+            let mediaBuf = null;
+            if (divulgarMediaMeta.hasMedia && fs.existsSync(DIVULGAR_MEDIA_PATH)) {
+              mediaBuf = fs.readFileSync(DIVULGAR_MEDIA_PATH);
+            }
+
+            if (!msgTexto && !mediaBuf) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Insira uma mensagem ou anexe uma mídia para divulgar' }));
+              return;
+            }
+
+            // Dispara a divulgação assincronamente em background
+            setImmediate(() => {
+              executeBroadcast({
+                sock: globalSock,
+                text: msgTexto,
+                mediaBuffer: mediaBuf,
+                mediaType: divulgarMediaMeta.mediaType,
+                mimeType: divulgarMediaMeta.mimeType,
+                fileName: divulgarMediaMeta.fileName
+              });
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Divulgação iniciada com sucesso para todos os grupos abertos!' }));
+            return;
+          }
+          if (body.action === 'stopBroadcast') {
+            abortBroadcast = true;
+            isBroadcasting = false;
+            broadcastProgress.active = false;
+            console.log('🛑 [API] Cancelamento de divulgação solicitado via dashboard.');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Divulgação cancelada' }));
+            return;
+          }
+          if (body.action === 'resetSession') {
+            console.log('🔄 [API] Solicitado reset da sessão do WhatsApp...');
+            isConnected = false;
+            latestQR = null;
+            if (globalSock) {
+              try { globalSock.end(new Error('Reset manual de sessão')); } catch (e) {}
+            }
+            const baseDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
+            const authPath = process.env.AUTH_DIR
+              ? path.resolve(process.env.AUTH_DIR)
+              : path.resolve(baseDataDir, 'auth_info');
+            
+            try {
+              if (fs.existsSync(authPath)) {
+                fs.rmSync(authPath, { recursive: true, force: true });
+              }
+            } catch (e) {}
+
+            setTimeout(startBot, 2000);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Sessão resetada com sucesso! Gerando novo QR Code...' }));
+            return;
+          }
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Ação inválida' }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // Página Principal Web: DASHBOARD COMPLETA INTERATIVA
     let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
     try {
       stats = await getStats();
@@ -367,218 +926,15 @@ const server = http.createServer(async (req, res) => {
       stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
     }
 
-    let qrDataUrl = null;
+    let initialQrUrl = null;
     if (latestQR && !isConnected) {
       try {
-        qrDataUrl = await QRCode.toDataURL(latestQR);
+        initialQrUrl = await QRCode.toDataURL(latestQR);
       } catch (e) {}
     }
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        success: true,
-        isConnected,
-        rdbModeEnabled,
-        autoRespMode,
-        autoRespMsg,
-        autoRespHasVideo: autoRespMediaMeta.hasMedia,
-        autoRespMedia: autoRespMediaMeta,
-        autoRespCooldownCount: autoRespCooldowns.size,
-        isProcessing,
-        isScheduledWaitActive: queueManager.isScheduledWaitActive(),
-        nextScheduledRun: queueManager.getNextScheduledRun(),
-        latestQR: qrDataUrl,
-        stats
-      })
-    );
-    return;
-  }
-
-  // Endpoint: POST /api/autoresp/media (ou /api/autoresp/video) — faz upload de qualquer mídia/arquivo do auto-responder
-  if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'POST') {
-    const contentType = req.headers['content-type'] || '';
-    if (!contentType.includes('multipart/form-data')) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Envie o arquivo como multipart/form-data' }));
-      return;
-    }
-    const boundary = contentType.split('boundary=')[1];
-    if (!boundary) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Boundary não encontrado' }));
-      return;
-    }
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', () => {
-      try {
-        const body = Buffer.concat(chunks);
-        const boundaryBuf = Buffer.from('--' + boundary);
-        let fileData = null;
-        let filename = 'arquivo';
-        let mimeType = 'application/octet-stream';
-
-        let start = 0;
-        while (start < body.length) {
-          const idx = body.indexOf(boundaryBuf, start);
-          if (idx === -1) break;
-          const nextStart = idx + boundaryBuf.length;
-          if (body[nextStart] === 45 && body[nextStart + 1] === 45) break; // '--' = end
-          const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), nextStart);
-          if (headerEnd === -1) break;
-          const header = body.slice(nextStart + 2, headerEnd).toString();
-          const dataStart = headerEnd + 4;
-          const nextBoundary = body.indexOf(boundaryBuf, dataStart);
-          const dataEnd = nextBoundary === -1 ? body.length : nextBoundary - 2;
-
-          if (header.includes('filename=')) {
-            fileData = body.slice(dataStart, dataEnd);
-
-            const fnMatch = header.match(/filename=["']?([^"';\r\n]+)["']?/i);
-            if (fnMatch && fnMatch[1]) filename = fnMatch[1].trim();
-
-            const ctMatch = header.match(/Content-Type:\s*([^\r\n]+)/i);
-            if (ctMatch && ctMatch[1]) mimeType = ctMatch[1].trim();
-
-            break;
-          }
-          start = nextBoundary === -1 ? body.length : nextBoundary;
-        }
-
-        if (!fileData || fileData.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Nenhum arquivo encontrado no envio' }));
-          return;
-        }
-
-        // Inferir mimeType se vier genérico
-        if (mimeType === 'application/octet-stream' || !mimeType) {
-          const ext = path.extname(filename).toLowerCase();
-          if (['.mp4', '.mkv', '.webm', '.avi', '.mov'].includes(ext)) mimeType = 'video/mp4';
-          else if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) mimeType = 'image/jpeg';
-          else if (['.mp3', '.ogg', '.wav', '.m4a'].includes(ext)) mimeType = 'audio/mp4';
-          else if (ext === '.pdf') mimeType = 'application/pdf';
-        }
-
-        fs.writeFileSync(AUTO_RESP_MEDIA_PATH, fileData);
-        autoRespMediaMeta = {
-          hasMedia: true,
-          fileName: filename,
-          mimeType: mimeType,
-          size: fileData.length
-        };
-        fs.writeFileSync(AUTO_RESP_META_PATH, JSON.stringify(autoRespMediaMeta, null, 2));
-
-        console.log(`📎 [Auto-Responder] Mídia/Arquivo carregado: ${filename} (${mimeType}, ${fileData.length} bytes)`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, size: fileData.length, meta: autoRespMediaMeta }));
-      } catch (err) {
-        console.error('❌ Erro ao salvar arquivo do auto-responder:', err.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-    });
-    return;
-  }
-
-  // Endpoint: DELETE /api/autoresp/media (ou /api/autoresp/video) — remove a mídia do auto-responder
-  if ((pathname === '/api/autoresp/media' || pathname === '/api/autoresp/video') && method === 'DELETE') {
-    try {
-      if (fs.existsSync(AUTO_RESP_MEDIA_PATH)) fs.unlinkSync(AUTO_RESP_MEDIA_PATH);
-      if (fs.existsSync(AUTO_RESP_META_PATH)) fs.unlinkSync(AUTO_RESP_META_PATH);
-      autoRespMediaMeta = { hasMedia: false, fileName: '', mimeType: '', size: 0 };
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Arquivo/Mídia removido com sucesso' }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: err.message }));
-    }
-    return;
-  }
-
-  // Endpoint REST API: POST /api/trigger (Ações da Dashboard: processar, alternar RDB, Auto-Responder)
-  if (pathname === '/api/trigger' && method === 'POST') {
-    let bodyText = '';
-    req.on('data', chunk => { bodyText += chunk.toString(); });
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(bodyText || '{}');
-        if (body.action === 'setAutoResp') {
-          if (body.mode) autoRespMode = body.mode;
-          if (body.msg !== undefined) autoRespMsg = body.msg;
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, autoRespMode, autoRespMsg }));
-          return;
-        }
-        if (body.action === 'toggleRdb') {
-          rdbModeEnabled = !rdbModeEnabled;
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, rdbModeEnabled }));
-          return;
-        }
-        if (body.action === 'process') {
-          if (globalSock) {
-            processHybridQueue(globalSock, rdbTargetJid || 'web@system');
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, message: 'Processamento iniciado' }));
-          return;
-        }
-        if (body.action === 'stop') {
-          abortProcessing = true;
-          isProcessing = false;
-          queueManager.clearSchedule();
-          console.log('🛑 [API] Solicitada interrupção do processamento...');
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, message: 'Processamento interrompido' }));
-          return;
-        }
-        if (body.action === 'resetSession') {
-          console.log('🔄 [API] Solicitado reset da sessão do WhatsApp...');
-          isConnected = false;
-          latestQR = null;
-          if (globalSock) {
-            try { globalSock.end(new Error('Reset manual de sessão')); } catch (e) {}
-          }
-          const baseDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : process.cwd();
-          const authPath = process.env.AUTH_DIR
-            ? path.resolve(process.env.AUTH_DIR)
-            : path.resolve(baseDataDir, 'auth_info');
-          
-          try {
-            if (fs.existsSync(authPath)) {
-              fs.rmSync(authPath, { recursive: true, force: true });
-            }
-          } catch (e) {}
-
-          setTimeout(startBot, 2000);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, message: 'Sessão resetada com sucesso! Gerando novo QR Code...' }));
-          return;
-        }
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Ação inválida' }));
-      } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: e.message }));
-      }
-    });
-    return;
-  }
-
-  // Página Principal Web: DASHBOARD COMPLETA INTERATIVA
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-
-  let stats = { total: 0, pending: 0, success: 0, failed: 0, rate_limited: 0 };
-  try {
-    stats = await getStats();
-  } catch (e) {
-    const pending = queueManager.getPendingItems().length;
-    stats = { total: pending, pending: pending, success: 0, failed: 0, rate_limited: 0 };
-  }
-
-   res.end(`
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`
 <!DOCTYPE html>
 <html lang="pt">
 <head>
@@ -603,6 +959,7 @@ const server = http.createServer(async (req, res) => {
       --wa-red-hover: #f87171;
       --wa-yellow: #ffbc11;
       --wa-blue: #53bdeb;
+      --wa-purple: #a855f7;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; }
@@ -619,6 +976,7 @@ const server = http.createServer(async (req, res) => {
     .badge-warning { background: rgba(255, 188, 17, 0.18); color: var(--wa-yellow); border: 1px solid rgba(255, 188, 17, 0.4); }
     .badge-info { background: rgba(83, 189, 235, 0.18); color: var(--wa-blue); border: 1px solid rgba(83, 189, 235, 0.4); }
     .badge-active { background: rgba(0, 168, 132, 0.2); color: var(--wa-green-hover); border: 1px solid var(--wa-green); }
+    .badge-purple { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.5); }
 
     .container { max-width: 1140px; margin: 1.5rem auto 0; padding: 0 1rem; }
 
@@ -643,7 +1001,7 @@ const server = http.createServer(async (req, res) => {
     .panel-header-title span { display: flex; align-items: center; gap: 8px; }
 
     /* QR CONTAINER */
-    .qr-container { text-align: center; padding: 1.2rem; background: var(--wa-card-inner); border-radius: 10px; border: 1px dashed var(--wa-border); min-height: 290px; display: flex; flex-direction: column; align-items: center; justify-center: center; }
+    .qr-container { text-align: center; padding: 1.2rem; background: var(--wa-card-inner); border-radius: 10px; border: 1px dashed var(--wa-border); min-height: 290px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
     .qr-container img { width: 220px; height: 220px; border-radius: 10px; border: 4px solid #fff; }
 
     /* INPUTS & TEXTAREAS */
@@ -662,6 +1020,8 @@ const server = http.createServer(async (req, res) => {
     button.btn-sec:hover { background: #222e35; border-color: var(--wa-green); }
     button.btn-danger { background: rgba(234, 0, 56, 0.2); color: #f87171; border: 1px solid rgba(234, 0, 56, 0.4); }
     button.btn-danger:hover { background: var(--wa-red); color: #fff; }
+    button.btn-purple { background: #7e22ce; color: #fff; border: 1px solid #a855f7; }
+    button.btn-purple:hover { background: #9333ea; }
 
     /* TABLE */
     .table-card { background: var(--wa-panel); border: 1px solid var(--wa-border); border-radius: 12px; padding: 1.4rem; overflow-x: auto; }
@@ -676,6 +1036,9 @@ const server = http.createServer(async (req, res) => {
     .tag-failed { background: rgba(234, 0, 56, 0.18); color: #f87171; border: 1px solid rgba(234, 0, 56, 0.3); }
     
     .toast { position: fixed; bottom: 24px; right: 24px; background: var(--wa-panel-header); color: #fff; padding: 12px 22px; border-radius: 10px; border: 1px solid var(--wa-green); box-shadow: 0 10px 30px rgba(0,0,0,0.6); display: none; z-index: 99; font-weight: 600; font-size: 0.9rem; }
+
+    .progress-bar-wrap { background: var(--wa-card-inner); border-radius: 8px; overflow: hidden; height: 10px; margin: 10px 0; border: 1px solid var(--wa-border); }
+    .progress-bar-fill { background: var(--wa-green); height: 100%; width: 0%; transition: width 0.3s ease; }
   </style>
 </head>
 <body>
@@ -696,6 +1059,9 @@ const server = http.createServer(async (req, res) => {
       </div>
       <div id="rdb-badge" class="badge ${rdbModeEnabled ? 'badge-info' : 'badge-warning'}">
         ${rdbModeEnabled ? '⚡ RDB Real-Time Ativo' : '⏹️ RDB Inativo'}
+      </div>
+      <div id="bcast-badge" class="badge ${isBroadcasting ? 'badge-purple' : 'badge-info'}">
+        ${isBroadcasting ? '📢 Divulgando...' : '📢 Divulgação Pronta'}
       </div>
     </div>
   </div>
@@ -760,6 +1126,56 @@ const server = http.createServer(async (req, res) => {
       </div>
     </div>
 
+    <!-- PAINEL DE DISPARO / DIVULGAÇÃO EM MASSA (MÍDIAS + TEXTO + MENÇÃO INVISÍVEL) -->
+    <div class="panel-card" style="margin-bottom: 1.5rem; border: 1px solid rgba(168, 85, 247, 0.4);">
+      <div class="panel-header-title">
+        <span>📢 Disparo de Divulgação em Massa (Grupos Abertos + Menção Invisível)</span>
+        <span id="divulgar-status-tag" class="badge badge-info" style="font-size:0.75rem;">Apenas Grupos Abertos</span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
+        <div>
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem ou Legenda da Divulgação:</label>
+          <textarea id="divulgar-msg" style="height: 110px; margin-bottom: 0.75rem;" placeholder="Digite aqui a mensagem que será disparada para todos os grupos abertos..."></textarea>
+          
+          <p style="font-size: 0.8rem; color: var(--wa-text-muted); line-height: 1.5; margin-bottom: 10px;">
+            • <b>Menção Invisível:</b> Notifica todos os membros de cada grupo!<br>
+            • <b>Filtro Automático:</b> Dispara somente onde o chat é aberto para membros.<br>
+            • <b>Anti-Ban:</b> Delay seguro de 3s entre envios.
+          </p>
+        </div>
+
+        <div>
+          <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📎 Anexar Mídia (Imagem, Vídeo, Áudio, PDF, etc.):</label>
+          <div id="divulgar-upload-area" style="border: 2px dashed var(--wa-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('divulgar-media-input').click()">
+            <div id="divulgar-upload-label" style="color: var(--wa-text-muted); font-size: 0.85rem;">📂 Clique para selecionar qualquer mídia (Imagem, Vídeo, Áudio, PDF)</div>
+            <input id="divulgar-media-input" type="file" accept="*" style="display:none">
+          </div>
+
+          <div id="divulgar-media-bar" style="display:none; background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: space-between;">
+            <span id="divulgar-media-text" style="font-size:0.82rem; color:#c084fc;">✅ Mídia anexada</span>
+            <button id="btn-remove-divulgar-media" style="background: rgba(234,0,56,0.2); border: 1px solid rgba(234,0,56,0.4); color: #f87171; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">🗑️ Remover Mídia</button>
+          </div>
+
+          <div class="btn-group" style="margin-top: 5px;">
+            <button id="btn-start-broadcast" class="btn-purple" style="flex: 1;">📢 Disparar Divulgação Agora</button>
+            <button id="btn-stop-broadcast" class="btn-danger" style="display: none;">🛑 Cancelar Disparo</button>
+          </div>
+
+          <!-- Barra de Progresso ao Vivo -->
+          <div id="divulgar-prog-box" style="display: none; margin-top: 10px;">
+            <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--wa-text-muted);">
+              <span id="divulgar-prog-text">Progresso do disparo...</span>
+              <span id="divulgar-prog-pct">0%</span>
+            </div>
+            <div class="progress-bar-wrap">
+              <div id="divulgar-prog-fill" class="progress-bar-fill"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- AUTO-RESPONDER INTELIGENTE -->
     <div class="panel-card" style="margin-bottom: 1.5rem;">
       <div class="panel-header-title">
@@ -778,12 +1194,12 @@ const server = http.createServer(async (req, res) => {
             • <b>Menção Invisível:</b> Notifica todos no grupo.<br>
             • <b>Variação Anti-Ban:</b> Emojis dinâmicos.<br>
             • <b>Cooldown:</b> Máx 1 resposta por conversa/hora.<br>
-            • <b>Delay Seguro:</b> 10s - 20s entre entradas.
+            • <b>Delay Seguro:</b> 5s - 8s entre respostas.
           </p>
         </div>
         <div>
           <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">Mensagem / Legenda de Resposta:</label>
-          <textarea id="autoresp-msg" style="height: 70px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem ou legenda do vídeo..."></textarea>
+          <textarea id="autoresp-msg" style="height: 70px; margin-bottom: 0.75rem;" placeholder="Digite a mensagem ou legenda do arquivo..."></textarea>
 
           <label style="font-size: 0.82rem; color: var(--wa-text-muted); font-weight: 700; display: block; margin-bottom: 6px;">📎 Anexo Mídia / Arquivo (Vídeo, Imagem, PDF, Áudio, Documento, etc.):</label>
           <div id="media-upload-area" style="border: 2px dashed var(--wa-border); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin-bottom: 0.75rem; transition: border-color 0.2s;" onclick="document.getElementById('autoresp-media-input').click()">
@@ -837,7 +1253,7 @@ const server = http.createServer(async (req, res) => {
 
     // Proteção contra sobrescrita durante digitação do usuário
     const userEditingSet = new Set();
-    ['autoresp-msg', 'autoresp-mode', 'links-input'].forEach(id => {
+    ['autoresp-msg', 'autoresp-mode', 'links-input', 'divulgar-msg'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.addEventListener('focus', () => userEditingSet.add(id));
@@ -864,13 +1280,17 @@ const server = http.createServer(async (req, res) => {
           rdbBadge.className = 'badge ' + (d.rdbModeEnabled ? 'badge-info' : 'badge-warning');
           rdbBadge.innerHTML = d.rdbModeEnabled ? '⚡ RDB Real-Time Ativo' : '⏹️ RDB Inativo';
 
+          const bcastBadge = document.getElementById('bcast-badge');
+          bcastBadge.className = 'badge ' + (d.isBroadcasting ? 'badge-purple' : 'badge-info');
+          bcastBadge.innerHTML = d.isBroadcasting ? '📢 Divulgando...' : '📢 Divulgação Pronta';
+
           // Stats
           document.getElementById('st-pending').innerText = d.stats.pending;
           document.getElementById('st-success').innerText = d.stats.success;
           document.getElementById('st-failed').innerText = d.stats.failed;
           document.getElementById('st-total').innerText = d.stats.total;
 
-          // Auto-Responder UI — NUNCA substitui se o usuário estiver focado ou digitando no campo!
+          // Auto-Responder UI
           const modeSel = document.getElementById('autoresp-mode');
           if (modeSel && document.activeElement !== modeSel && !userEditingSet.has('autoresp-mode')) {
             modeSel.value = d.autoRespMode || 'off';
@@ -880,7 +1300,7 @@ const server = http.createServer(async (req, res) => {
             msgArea.value = d.autoRespMsg || '';
           }
 
-          // Status do anexo de mídia
+          // Status do anexo de Auto-Responder
           const msBar = document.getElementById('media-status-bar');
           const msText = document.getElementById('media-status-text');
           const media = d.autoRespMedia || {};
@@ -891,6 +1311,38 @@ const server = http.createServer(async (req, res) => {
             } else {
               msBar.style.display = 'none';
             }
+          }
+
+          // Status do anexo de Divulgação
+          const divBar = document.getElementById('divulgar-media-bar');
+          const divText = document.getElementById('divulgar-media-text');
+          const divMedia = d.divulgarMedia || {};
+          if (divBar && divText) {
+            if (divMedia.hasMedia) {
+              divBar.style.display = 'flex';
+              divText.textContent = '✅ Mídia: ' + (divMedia.fileName || 'arquivo') + ' (' + (divMedia.mimeType || 'mídia') + ')';
+            } else {
+              divBar.style.display = 'none';
+            }
+          }
+
+          // Status do Progresso da Divulgação
+          const progBox = document.getElementById('divulgar-prog-box');
+          const btnStartBcast = document.getElementById('btn-start-broadcast');
+          const btnStopBcast = document.getElementById('btn-stop-broadcast');
+          if (d.isBroadcasting && d.broadcastProgress?.active) {
+            progBox.style.display = 'block';
+            btnStartBcast.style.display = 'none';
+            btnStopBcast.style.display = 'inline-flex';
+            const bp = d.broadcastProgress;
+            const pct = bp.total > 0 ? Math.round((bp.current / bp.total) * 100) : 0;
+            document.getElementById('divulgar-prog-pct').innerText = pct + '%';
+            document.getElementById('divulgar-prog-fill').style.width = pct + '%';
+            document.getElementById('divulgar-prog-text').innerText = 'Enviando ' + bp.current + '/' + bp.total + ' (' + bp.success + ' sucessos, ' + bp.failed + ' falhas)...';
+          } else {
+            progBox.style.display = 'none';
+            btnStartBcast.style.display = 'inline-flex';
+            btnStopBcast.style.display = 'none';
           }
 
           // QR Code Box
@@ -936,7 +1388,7 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {}
     }
 
-    // Event Listeners
+    // Event Listeners: Links
     document.getElementById('btn-add').addEventListener('click', async () => {
       const input = document.getElementById('links-input');
       const text = input.value.trim();
@@ -1035,7 +1487,110 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {}
     });
 
-    // ── Media / File upload handling (qualquer arquivo) ──
+    // ── Disparo / Divulgação em Massa (Web Dashboard) ──
+    const btnStartBcast = document.getElementById('btn-start-broadcast');
+    if (btnStartBcast) {
+      btnStartBcast.addEventListener('click', async () => {
+        const msg = document.getElementById('divulgar-msg').value.trim();
+        const hasMedia = document.getElementById('divulgar-media-bar').style.display !== 'none';
+
+        if (!msg && !hasMedia) {
+          showToast('⚠️ Escreva uma mensagem ou anexe uma mídia para divulgar!');
+          return;
+        }
+
+        if (!confirm('Deseja iniciar o disparo de divulgação para TODOS os grupos com chat aberto?')) return;
+
+        try {
+          const res = await fetch('/api/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'broadcast', msg })
+          });
+          const d = await res.json();
+          if (d.success) {
+            showToast('🚀 Disparo de divulgação iniciado!');
+            updateStatus();
+          } else {
+            showToast('Erro: ' + (d.error || 'falha ao iniciar disparo'));
+          }
+        } catch (e) {
+          showToast('Erro ao iniciar divulgação');
+        }
+      });
+    }
+
+    const btnStopBcast = document.getElementById('btn-stop-broadcast');
+    if (btnStopBcast) {
+      btnStopBcast.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'stopBroadcast' })
+          });
+          const d = await res.json();
+          if (d.success) {
+            showToast('🛑 Divulgação cancelada!');
+            updateStatus();
+          }
+        } catch (e) { showToast('Erro ao cancelar divulgação'); }
+      });
+    }
+
+    const divulgarMediaInput = document.getElementById('divulgar-media-input');
+    const divulgarMediaArea = document.getElementById('divulgar-upload-area');
+    const divulgarMediaLabel = document.getElementById('divulgar-upload-label');
+    if (divulgarMediaInput) {
+      divulgarMediaInput.addEventListener('change', async () => {
+        const file = divulgarMediaInput.files[0];
+        if (!file) return;
+        if (file.size > 100 * 1024 * 1024) { showToast('⚠️ Arquivo deve ter no máximo 100MB!'); return; }
+        divulgarMediaLabel.textContent = '⏳ Enviando ' + file.name + '...';
+        divulgarMediaArea.style.borderColor = '#ffbc11';
+        const formData = new FormData();
+        formData.append('media', file, file.name);
+        try {
+          const res = await fetch('/api/divulgar/media', { method: 'POST', body: formData });
+          const d = await res.json();
+          if (d.success) {
+            divulgarMediaLabel.textContent = '✅ ' + file.name + ' anexado! Clique para trocar.';
+            divulgarMediaArea.style.borderColor = '#a855f7';
+            document.getElementById('divulgar-media-bar').style.display = 'flex';
+            document.getElementById('divulgar-media-text').textContent = '✅ Mídia: ' + file.name;
+            showToast('📎 Mídia ' + file.name + ' anexada para divulgação!');
+          } else {
+            divulgarMediaLabel.textContent = '❌ Erro ao carregar. Tente novamente.';
+            divulgarMediaArea.style.borderColor = '#ea0038';
+            showToast('Erro: ' + (d.error || 'falha no upload'));
+          }
+        } catch (e) {
+          divulgarMediaLabel.textContent = '❌ Erro de rede. Tente novamente.';
+          divulgarMediaArea.style.borderColor = '#ea0038';
+          showToast('Erro ao enviar arquivo!');
+        }
+      });
+    }
+
+    const btnRemoveDivulgarMedia = document.getElementById('btn-remove-divulgar-media');
+    if (btnRemoveDivulgarMedia) {
+      btnRemoveDivulgarMedia.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const res = await fetch('/api/divulgar/media', { method: 'DELETE' });
+          const d = await res.json();
+          if (d.success) {
+            document.getElementById('divulgar-media-bar').style.display = 'none';
+            divulgarMediaArea.style.borderColor = 'var(--wa-border)';
+            divulgarMediaLabel.textContent = '📂 Clique para selecionar qualquer mídia (Imagem, Vídeo, Áudio, PDF)';
+            if (divulgarMediaInput) divulgarMediaInput.value = '';
+            showToast('🗑️ Mídia de divulgação removida!');
+          }
+        } catch (e) { showToast('Erro ao remover mídia'); }
+      });
+    }
+
+    // ── Auto-Responder Media / File Upload Handling ──
     const mediaInput = document.getElementById('autoresp-media-input');
     const mediaArea = document.getElementById('media-upload-area');
     const mediaLabel = document.getElementById('media-upload-label');
@@ -1121,7 +1676,14 @@ const server = http.createServer(async (req, res) => {
   </script>
 </body>
 </html>
-  `);
+    `);
+  } catch (serverErr) {
+    console.error('❌ Erro no processamento de requisição HTTP:', serverErr);
+    try {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Erro interno no servidor: ' + serverErr.message }));
+    } catch (e) {}
+  }
 });
 
 server.listen(PORT, async () => {
@@ -1495,113 +2057,149 @@ _Modo RDB Atual:_ *${rdbModeEnabled ? '⚡ ATIVADO' : '⏹️ DESATIVADO'}*`;
         }
 
         // ---------------------------------------------------------
-        // 3.2 COMANDO: !divulgar / !broadcast <mensagem | vídeo+legenda>
-        // Envia texto OU vídeo para todos os grupos com chat aberto + menção invisível
-        // Para vídeo: envie um vídeo no WhatsApp com caption "!divulgar" ou "!divulgar legenda"
+        // 3.2 COMANDO: !divulgar / !broadcast <mensagem | mídia+legenda | resposta citando mídia>
+        // Dispara para TODOS os grupos com chat aberto + menção invisível
+        // Suporta: Texto, Imagem, Vídeo, Áudio, Documento/PDF ou citar qualquer mídia
         // ---------------------------------------------------------
         if (lowerText.startsWith('!divulgar') || lowerText.startsWith('!broadcast')) {
-          // --- Detectar se mensagem tem vídeo anexado ---
-          const videoMsg = msg.message.videoMessage;
-          const hasVideo = !!videoMsg;
+          let mediaMsg = null;
+          let mediaType = null; // 'image' | 'video' | 'audio' | 'document'
+          let targetMsgForDl = msg;
+          let mimeType = '';
+          let fileName = 'arquivo';
 
-          // --- Extrair texto/legenda ---
+          // 1. Detectar mídia direta anexada na mensagem
+          if (msg.message?.imageMessage) {
+            mediaMsg = msg.message.imageMessage;
+            mediaType = 'image';
+            mimeType = mediaMsg.mimetype || 'image/jpeg';
+          } else if (msg.message?.videoMessage) {
+            mediaMsg = msg.message.videoMessage;
+            mediaType = 'video';
+            mimeType = mediaMsg.mimetype || 'video/mp4';
+          } else if (msg.message?.audioMessage) {
+            mediaMsg = msg.message.audioMessage;
+            mediaType = 'audio';
+            mimeType = mediaMsg.mimetype || 'audio/mp4';
+          } else if (msg.message?.documentMessage) {
+            mediaMsg = msg.message.documentMessage;
+            mediaType = 'document';
+            mimeType = mediaMsg.mimetype || 'application/pdf';
+            fileName = mediaMsg.fileName || 'documento.pdf';
+          } else if (msg.message?.documentWithCaptionMessage?.message?.documentMessage) {
+            mediaMsg = msg.message.documentWithCaptionMessage.message.documentMessage;
+            mediaType = 'document';
+            mimeType = mediaMsg.mimetype || 'application/pdf';
+            fileName = mediaMsg.fileName || 'documento.pdf';
+          } else if (msg.message?.viewOnceMessage?.message?.imageMessage) {
+            mediaMsg = msg.message.viewOnceMessage.message.imageMessage;
+            mediaType = 'image';
+            mimeType = mediaMsg.mimetype || 'image/jpeg';
+          } else if (msg.message?.viewOnceMessage?.message?.videoMessage) {
+            mediaMsg = msg.message.viewOnceMessage.message.videoMessage;
+            mediaType = 'video';
+            mimeType = mediaMsg.mimetype || 'video/mp4';
+          } else if (msg.message?.viewOnceMessageV2?.message?.imageMessage) {
+            mediaMsg = msg.message.viewOnceMessageV2.message.imageMessage;
+            mediaType = 'image';
+            mimeType = mediaMsg.mimetype || 'image/jpeg';
+          } else if (msg.message?.viewOnceMessageV2?.message?.videoMessage) {
+            mediaMsg = msg.message.viewOnceMessageV2.message.videoMessage;
+            mediaType = 'video';
+            mimeType = mediaMsg.mimetype || 'video/mp4';
+          }
+
+          // 2. Detectar mídia em mensagem citada (Reply)
+          const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+          if (!mediaType && quoted) {
+            if (quoted.imageMessage) {
+              mediaMsg = quoted.imageMessage;
+              mediaType = 'image';
+              mimeType = mediaMsg.mimetype || 'image/jpeg';
+              targetMsgForDl = { message: { imageMessage: quoted.imageMessage } };
+            } else if (quoted.videoMessage) {
+              mediaMsg = quoted.videoMessage;
+              mediaType = 'video';
+              mimeType = mediaMsg.mimetype || 'video/mp4';
+              targetMsgForDl = { message: { videoMessage: quoted.videoMessage } };
+            } else if (quoted.audioMessage) {
+              mediaMsg = quoted.audioMessage;
+              mediaType = 'audio';
+              mimeType = mediaMsg.mimetype || 'audio/mp4';
+              targetMsgForDl = { message: { audioMessage: quoted.audioMessage } };
+            } else if (quoted.documentMessage) {
+              mediaMsg = quoted.documentMessage;
+              mediaType = 'document';
+              mimeType = mediaMsg.mimetype || 'application/pdf';
+              fileName = mediaMsg.fileName || 'documento.pdf';
+              targetMsgForDl = { message: { documentMessage: quoted.documentMessage } };
+            } else if (quoted.documentWithCaptionMessage?.message?.documentMessage) {
+              mediaMsg = quoted.documentWithCaptionMessage.message.documentMessage;
+              mediaType = 'document';
+              mimeType = mediaMsg.mimetype || 'application/pdf';
+              fileName = mediaMsg.fileName || 'documento.pdf';
+              targetMsgForDl = { message: { documentMessage: quoted.documentWithCaptionMessage.message.documentMessage } };
+            } else if (quoted.viewOnceMessage?.message?.imageMessage) {
+              mediaMsg = quoted.viewOnceMessage.message.imageMessage;
+              mediaType = 'image';
+              mimeType = mediaMsg.mimetype || 'image/jpeg';
+              targetMsgForDl = { message: { imageMessage: quoted.viewOnceMessage.message.imageMessage } };
+            } else if (quoted.viewOnceMessage?.message?.videoMessage) {
+              mediaMsg = quoted.viewOnceMessage.message.videoMessage;
+              mediaType = 'video';
+              mimeType = mediaMsg.mimetype || 'video/mp4';
+              targetMsgForDl = { message: { videoMessage: quoted.viewOnceMessage.message.videoMessage } };
+            }
+          }
+
+          // 3. Extrair texto / legenda
           const msgTexto = trimmedText.replace(/^!(divulgar|broadcast)\s*/i, '').trim();
 
-          // Sem conteúdo (nem vídeo nem texto)
-          if (!msgTexto && !hasVideo) {
+          // Sem conteúdo (nem mídia nem texto)
+          if (!msgTexto && !mediaType) {
             await sock.sendMessage(fromJid, {
-              text: `⚠️ *Uso do Comando:*\n\n` +
-                    `📝 *Texto:* \`!divulgar Minha mensagem de divulgação\`\n` +
-                    `📹 *Vídeo:* Envie um vídeo com legenda \`!divulgar Legenda aqui\` (ou só \`!divulgar\`)\n\n` +
-                    `Dispara para **todos os grupos com chat aberto**, com **menção invisível**!`
+              text: `⚠️ *Uso do Comando de Divulgação:*\n\n` +
+                    `📝 *Texto:* \`!divulgar Minha mensagem aqui\`\n` +
+                    `🖼️ *Imagem:* Envie imagem com legenda \`!divulgar Minha legenda\`\n` +
+                    `📹 *Vídeo:* Envie vídeo com legenda \`!divulgar Minha legenda\`\n` +
+                    `🎵 *Áudio:* Envie ou responda a um áudio com \`!divulgar\`\n` +
+                    `📄 *Documento/PDF:* Envie documento com legenda \`!divulgar Minha legenda\`\n` +
+                    `↩️ *Resposta:* Responda a qualquer mensagem/mídia com \`!divulgar <legenda>\`\n\n` +
+                    `🚀 Dispara para **todos os grupos com chat aberto**, com **menção invisível**!`
             });
             continue;
           }
 
-          await sock.sendMessage(fromJid, {
-            text: `📢 *Iniciando Disparo de Divulgação...*\n\n${hasVideo ? '📹 Modo: Vídeo com legenda' : '📝 Modo: Texto'}\nBuscando grupos com chat aberto...`
-          });
-
-          // --- Baixar vídeo se existir ---
-          let videoBuffer = null;
-          if (hasVideo) {
+          // 4. Baixar mídia se detectada
+          let mediaBuffer = null;
+          if (mediaType && targetMsgForDl) {
             try {
-              videoBuffer = await downloadMediaMessage(
-                msg,
+              mediaBuffer = await downloadMediaMessage(
+                targetMsgForDl,
                 'buffer',
                 {},
                 { logger: pino({ level: 'silent' }), reconnect: sock.type }
               );
-              console.log(`📹 [Divulgar] Vídeo baixado: ${videoBuffer.length} bytes`);
+              console.log(`📎 [Divulgar] Mídia (${mediaType}) baixada com sucesso: ${mediaBuffer.length} bytes`);
             } catch (dlErr) {
-              console.error('❌ Erro ao baixar vídeo para divulgação:', dlErr.message);
+              console.error(`❌ Erro ao baixar mídia para divulgação:`, dlErr.message);
               await sock.sendMessage(fromJid, {
-                text: `❌ Falha ao baixar o vídeo. Tente reenviar.`
+                text: `❌ Falha ao baixar o anexo de mídia. Tente reenviar ou use a Dashboard Web.`
               });
               continue;
             }
           }
 
-          try {
-            const groupsDict = await sock.groupFetchAllParticipating();
-            const allGroups = Object.values(groupsDict);
-            // Filtra grupos onde o chat é aberto para membros (!announce)
-            const openGroups = allGroups.filter(g => !g.announce);
-
-            if (openGroups.length === 0) {
-              await sock.sendMessage(fromJid, {
-                text: `⚠️ Nenhum grupo com chat aberto encontrado (${allGroups.length} grupos verificados).`
-              });
-              continue;
-            }
-
-            await sock.sendMessage(fromJid, {
-              text: `🚀 *Disparando para ${openGroups.length} grupos abertos...*\n(Menção invisível ativa. Delay seguro de 3s entre grupos.)`
-            });
-
-            let sucessos = 0;
-            let falhas = 0;
-
-            for (const group of openGroups) {
-              try {
-                const participants = group.participants ? group.participants.map(p => p.id) : [];
-
-                if (videoBuffer) {
-                  // Envia vídeo + legenda + menção invisível
-                  await sock.sendMessage(group.id, {
-                    video: videoBuffer,
-                    caption: msgTexto || '',
-                    mentions: participants,
-                    mimetype: videoMsg.mimetype || 'video/mp4'
-                  });
-                } else {
-                  // Envia texto + menção invisível
-                  await sock.sendMessage(group.id, {
-                    text: msgTexto,
-                    mentions: participants
-                  });
-                }
-                sucessos++;
-              } catch (e) {
-                falhas++;
-                console.error(`❌ [Divulgar] Falha no grupo ${group.id}: ${e.message}`);
-              }
-              // Delay seguro de 3 segundos entre envios de grupos
-              await new Promise(r => setTimeout(r, 3000));
-            }
-
-            await sock.sendMessage(fromJid, {
-              text: `✅ *Divulgação Concluída!*\n\n` +
-                    `• ${hasVideo ? '📹 Vídeo' : '📝 Texto'} enviado\n` +
-                    `• ✅ Sucesso: *${sucessos}*\n` +
-                    `• ❌ Falhas: *${falhas}*\n` +
-                    `• 📊 Total grupos abertos: *${openGroups.length}*`
-            });
-          } catch (err) {
-            await sock.sendMessage(fromJid, {
-              text: `❌ Erro ao buscar lista de grupos: ${err.message}`
-            });
-          }
+          // 5. Executa a divulgação com menção invisível
+          await executeBroadcast({
+            sock,
+            text: msgTexto,
+            mediaBuffer,
+            mediaType,
+            mimeType,
+            fileName,
+            fromJid
+          });
           continue;
         }
 
@@ -1941,6 +2539,15 @@ async function checkScheduledHybridQueue(sock) {
     }
   }
 }
+
+// Tratamento global de erros para manter a aplicação online 24/7 no Fly.io / Render
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ [Process] Exceção não capturada interceptada (prevenindo crash):', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ [Process] Rejeição de Promise não tratada interceptada:', reason);
+});
 
 // Iniciar o bot
 startBot().catch((err) => {
